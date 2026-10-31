@@ -237,10 +237,16 @@ dmtcp_get_uniquepid_str(void)
   return ProcessInfo::instance().upidStr().c_str();
 }
 
+// A forked child's upid is null until its first checkpoint (resetOnFork);
+// getUpid() then takes the child's own, which UniquePid reset at the fork.
+// Read directly, every connection a child created before its first
+// checkpoint was named 0-0-0(n), with n counted on from the parent's: two
+// children's connections got the same names, and the restart waited forever
+// for a connection the other child had taken.
 EXTERNC DmtcpUniqueProcessId
 dmtcp_get_uniquepid(void)
 {
-  return ProcessInfo::instance().upid;
+  return ProcessInfo::instance().getUpid().upid();
 }
 
 EXTERNC DmtcpUniqueProcessId

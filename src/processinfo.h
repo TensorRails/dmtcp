@@ -88,7 +88,7 @@ class ProcessInfo : public DmtcpCkptHeader
 
     const string &upidStr() {
       if (_upidStr.empty()) {
-        _upidStr = UniquePid(upid).toString();
+        _upidStr = getUpid().toString();
       }
       return _upidStr;
     }
