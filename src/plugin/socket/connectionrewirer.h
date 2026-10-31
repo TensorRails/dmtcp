@@ -46,6 +46,10 @@ class ConnectionRewirer
     static ConnectionRewirer &instance();
     static void destroy();
 
+    // The address family whose restore listener rewires a socket of this
+    // domain: without IPv6 support, IPv6 connections go through IPv4.
+    static int restoreDomain(int domain);
+
     void openRestoreSocket(bool hasIPv4, bool hasIPv6, bool hasUNIX);
     void registerIncoming(const ConnectionIdentifier &local,
                           Connection *con,

@@ -190,7 +190,8 @@ SocketConnList::preCkpt()
   for (iterator i = begin(); i != end(); ++i) {
     Connection *con = i->second;
     if (con->hasLock() && con->conType() == Connection::TCP) {
-      int domain = ((TcpConnection *)con)->sockDomain();
+      int domain = ConnectionRewirer::restoreDomain(
+        ((TcpConnection *)con)->sockDomain());
       if (domain == AF_INET) {
         _hasIPv4Sock = true;
       } else if (domain == AF_INET6) {
