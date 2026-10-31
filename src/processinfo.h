@@ -46,6 +46,7 @@ class ProcessInfo : public DmtcpCkptHeader
     void resetOnFork();
     void preCkpt();
     void restart();
+    void restartCkptDir();
     void restoreProcessGroupInfo();
     void restoreHeap();
     void growStack();

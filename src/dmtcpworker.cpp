@@ -556,6 +556,7 @@ DmtcpWorker::postRestart()
   TRACE("Waiting for Restart barrier");
   CoordinatorAPI::waitForBarrier("DMT:Restart");
 
+  ProcessInfo::instance().restartCkptDir();
   PluginManager::eventHook(DMTCP_EVENT_RESTART);
 
   TRACE("got resume message after restart");
