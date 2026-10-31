@@ -57,6 +57,7 @@ class SocketConnection
                      ConnectionIdentifier remote);
     void addSetsockopt(int level, int option, const void *value, int len);
     void restoreSocketOptions(vector<int32_t> &fds);
+    void restoreBindOptions(int fd);
     void serialize(jalib::JBinarySerializer &o);
     int sockDomain() const { return _sockDomain; }
     int sockType() const { return _sockType; }
