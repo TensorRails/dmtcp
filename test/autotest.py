@@ -2012,6 +2012,7 @@ class TestRegistry:
             TestSpec("timer1", 1, ["./test/timer1"]),
             TestSpec("clock", 1, ["./test/clock"]),
             TestSpec("dlopen1", 1, ["./test/dlopen1"]),
+            TestSpec("dlopen-origin", 1, ["./test/dlopen-origin"]),
             TestSpec("dmtcp5", 2, ["./test/dmtcp5"]),
             TestSpec("syscall-tester", 1,
                      ["--checkpoint-open-files ./test/syscall-tester"],
