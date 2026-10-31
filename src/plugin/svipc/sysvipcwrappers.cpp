@@ -258,6 +258,21 @@ shmget(key_t key, size_t size, int shmflg)
   return virtId;
 }
 
+// A segment created through a path that bypasses shmget's wrapper has no
+// virtual id: UCX's memory hooks call the original shmget through
+// dlsym(RTLD_NEXT) to test shmat events, then remove the segment with the
+// wrapped shmctl. Its id is the kernel's; use it as is, untracked.
+static int
+realShmId(int shmid)
+{
+  int realShmid = VIRTUAL_TO_REAL_SHM_ID(shmid);
+  if (realShmid == -1) {
+    TRACE("SysV shm id not issued by DMTCP, passed through: shmid={}", shmid);
+    return shmid;
+  }
+  return realShmid;
+}
+
 extern "C"
 void *shmat(int shmid, const void *shmaddr, int shmflg)
 {
@@ -266,9 +281,7 @@ void *shmat(int shmid, const void *shmaddr, int shmflg)
   }
 
   WrapperLock wrapperLock;
-  int realShmid = VIRTUAL_TO_REAL_SHM_ID(shmid);
-  ASSERT(realShmid != -1, "shmat virtual id has no real mapping: shmid={}",
-         shmid);
+  int realShmid = realShmId(shmid);
   void *ret = _real_shmat(realShmid, shmaddr, shmflg);
 #ifdef __arm__
 
@@ -390,9 +403,7 @@ shmctl(int shmid, int cmd, struct shmid_ds *buf)
     break;
   }
 
-  int realShmid = VIRTUAL_TO_REAL_SHM_ID(shmid);
-  ASSERT(realShmid != -1, "shmctl virtual id has no real mapping: shmid={}",
-         shmid);
+  int realShmid = realShmId(shmid);
   int ret = _real_shmctl(realShmid, cmd, buf);
   if (ret != -1 && buf != NULL && cmd == IPC_STAT) {
     buf->shm_cpid = dmtcp_pid_real_to_virtual(buf->shm_cpid);
