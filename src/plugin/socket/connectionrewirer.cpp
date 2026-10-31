@@ -130,6 +130,14 @@ ConnectionRewirer::doReconnect()
     Connection *con = i->second;
     struct RemoteAddr &remoteAddr = _remoteInfo[id];
     int fd = con->getFds()[0];
+
+    // A socket created with SOCK_NONBLOCK would return EINPROGRESS: connect
+    // and send the identifier blocking, then put its flags back.
+    int flags = _real_fcntl(fd, F_GETFL, NULL);
+    ASSERT_NE(-1, flags, "fcntl(F_GETFL) failed: fd={}", fd);
+    if (flags & O_NONBLOCK) {
+      markSocketBlocking(fd);
+    }
     errno = 0;
     ASSERT_ERRNO(_real_connect(fd,
                                (sockaddr *)&remoteAddr.addr,
@@ -140,6 +148,9 @@ ConnectionRewirer::doReconnect()
                  id.time(), id.conId());
 
     Util::writeAll(fd, &id, sizeof id);
+    if (flags & O_NONBLOCK) {
+      markSocketNonBlocking(fd);
+    }
 
     checkForPendingIncoming(PROTECTED_RESTORE_IP4_SOCK_FD,
                             &_pendingIP4Incoming);

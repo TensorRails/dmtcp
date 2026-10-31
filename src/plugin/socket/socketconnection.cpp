@@ -839,11 +839,12 @@ TcpConnection::postRestart()
             id().toString(), _fds[0]);
     }
     errno = 0;
-    WARN_NE(-1, _real_bind(_fds[0],
-                                           (sockaddr *)&_bindAddr,
-                                           _bindAddrlen),
-                                "Bind failed: fd={} con_id={} addrlen={}",
-                                _fds[0], id().conId(), _bindAddrlen);
+    WARN_ERRNO(_real_bind(_fds[0], (sockaddr *)&_bindAddr, _bindAddrlen) != -1,
+               "Bind failed: fd={} con_id={} family={} port={} addrlen={}",
+               _fds[0], id().conId(), _bindAddr.ss_family,
+               _sockDomain == AF_UNIX
+                 ? 0 : ntohs(((sockaddr_in *)&_bindAddr)->sin_port),
+               _bindAddrlen);
     if (_type == TCP_BIND) {
       break;
     }
