@@ -794,6 +794,25 @@ fcntl(int fd, int cmd, ...)
   return res;
 }
 
+#ifdef __LP64__
+// glibc 2.28 and later compile fcntl into fcntl64 when _FILE_OFFSET_BITS is
+// 64, as CPython is built. Without this wrapper a duplicate made through it
+// (os.dup is F_DUPFD_CLOEXEC) was a descriptor DMTCP did not know: the child
+// of multiprocessing's spawn keeps its parent sentinel only as such a
+// duplicate, and the parent then drained its end of the pipe forever at
+// checkpoint. On 64-bit targets fcntl64 is fcntl; like glibc's, this takes
+// the argument as a pointer-sized value whatever the command.
+extern "C" int
+fcntl64(int fd, int cmd, ...)
+{
+  va_list ap;
+  va_start(ap, cmd);
+  void *arg = va_arg(ap, void *);
+  va_end(ap);
+  return fcntl(fd, cmd, arg);
+}
+#endif
+
 extern "C" FILE *
 tmpfile()
 {
