@@ -175,7 +175,8 @@ mtcp_simulateread(RestoreInfo *rinfo)
     }
 
     if ((area.properties & DMTCP_ZERO_PAGE) == 0 &&
-        (area.properties & DMTCP_ZERO_PAGE_PARENT_HEADER) == 0) {
+        (area.properties & DMTCP_ZERO_PAGE_PARENT_HEADER) == 0 &&
+        (area.properties & DMTCP_FILE_MAPPED) == 0) {
 
       off_t seekLen = area.size;
       if (!(area.flags & MAP_ANONYMOUS) && area.mmapFileSize > 0) {
@@ -196,7 +197,8 @@ mtcp_simulateread(RestoreInfo *rinfo)
                   ((area.flags & MAP_SHARED)
                     ? 's'
                     : ((area.flags & MAP_PRIVATE) ? 'p' : '-')),
-                  ((area.flags & MAP_ANONYMOUS) ? "Anon" : "    "),
+                  ((area.flags & MAP_ANONYMOUS) ? "Anon"
+                   : (area.properties & DMTCP_FILE_MAPPED) ? "File" : "    "),
 
                   // area.offset, area.devmajor, area.devminor, area.inodenum,
                   area.name);
@@ -844,6 +846,44 @@ mtcp_readmemoryareas(RestoreInfo *rinfo, int fd, VA endOfStack)
 #endif /* if defined(__arm__) || defined(__aarch64__) */
 }
 
+// Maps again a file area the checkpoint did not save (DMTCP_FILE_MAPPED).
+// The file must be the one checkpointed, same size and mtime: another would
+// silently put other code or data at these addresses, so the restart stops.
+NO_OPTIMIZE
+static void
+restore_file_mapped_area(RestoreInfo *rinfo, Area *area)
+{
+  int mtcp_sys_errno;
+  struct stat st;
+
+  int fd = mtcp_sys_open(area->name, O_RDONLY, 0);
+  if (fd < 0) {
+    MTCP_PRINTF("cannot open %s, which the image maps at %p: error %d\n",
+                area->name, area->addr, mtcp_sys_errno);
+    mtcp_abort();
+  }
+  if (mtcp_sys_fstat(fd, &st) < 0) {
+    MTCP_PRINTF("cannot stat %s: error %d\n", area->name, mtcp_sys_errno);
+    mtcp_abort();
+  }
+  if ((uint64_t)st.st_size != area->fileSize ||
+      st.st_mtim.tv_sec != area->fileMtimeSec ||
+      st.st_mtim.tv_nsec != area->fileMtimeNsec) {
+    MTCP_PRINTF("%s is not the file checkpointed: size %p mtime %p.%p, "
+                "checkpointed size %p mtime %p.%p\n", area->name,
+                (void *)st.st_size, (void *)st.st_mtim.tv_sec,
+                (void *)st.st_mtim.tv_nsec, (void *)area->fileSize,
+                (void *)area->fileMtimeSec, (void *)area->fileMtimeNsec);
+    mtcp_abort();
+  }
+  DPRINTF(rinfo, "mapping %p bytes at %p from %s + %p\n",
+          area->size, area->addr, area->name, area->offset);
+  void *addr = mmap_fixed_noreplace(rinfo, area->addr, area->size, area->prot,
+                                    MAP_PRIVATE, fd, area->offset);
+  MTCP_ASSERT(addr == area->addr);
+  mtcp_sys_close(fd);
+}
+
 NO_OPTIMIZE
 static int
 read_one_memory_area(RestoreInfo *rinfo, int fd, VA endOfStack)
@@ -858,6 +898,11 @@ read_one_memory_area(RestoreInfo *rinfo, int fd, VA endOfStack)
   mtcp_readfile(fd, &area, sizeof area);
   if (area.addr == NULL) {
     return -1;
+  }
+
+  if (area.properties & DMTCP_FILE_MAPPED) {
+    restore_file_mapped_area(rinfo, &area);
+    return 0;
   }
 
   if (area.name[0] && mtcp_strstr(area.name, "[heap]")

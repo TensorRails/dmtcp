@@ -445,6 +445,31 @@ mtcp_write_anonymous_pages(int fd, Area area, bool residencyScanSafe)
   }
 }
 
+// True if the area is the file's own pages, which the restart can map from
+// the file instead of the image: a private mapping that cannot be written,
+// within the file's pages, and with no page copied on write (a library's
+// RELRO is read-only too, but relocated) or swapped out.  Most of a process
+// that loaded torch and the CUDA libraries is such text and read-only data.
+static bool
+fileMappable(const Area &area, const struct stat &st, bool statValid)
+{
+  if (!statValid || !S_ISREG(st.st_mode) || !(area.flags & MAP_PRIVATE) ||
+      (area.flags & MAP_SHARED) || (area.prot & PROT_WRITE) ||
+      Util::strEndsWith(area.name, DELETED_FILE_SUFFIX) ||
+      Util::readBooleanEnv(ENV_VAR_DISABLE_FILE_MAPPED, false)) {
+    return false;
+  }
+  // Past the file's last page a mapping faults with SIGBUS: only saved data
+  // can stand in there.
+  const uint64_t page = Util::pageSize();
+  const uint64_t filePages = ((uint64_t)st.st_size + page - 1) / page * page;
+  if ((uint64_t)area.offset + area.size > filePages) {
+    return false;
+  }
+  return !Util::areaHasPrivatePages((uintptr_t)area.addr,
+                                    (uintptr_t)area.endAddr);
+}
+
 static void
 writememoryarea(int fd, Area area)
 {
@@ -679,6 +704,15 @@ writememoryarea(int fd, Area area)
     // Handle non-existing files (deleted file: not residency-safe, so the
     // content scan runs regardless of residencyScanSafe).
     mtcp_write_anonymous_pages(fd, area, residencyScanSafe);
+  } else if (fileMappable(area, areaStat, areaStatValid)) {
+    // No data: mtcp_restart maps the file again, once it checked it is this one.
+    area.properties |= DMTCP_FILE_MAPPED;
+    area.fileSize = areaStat.st_size;
+    area.fileMtimeSec = areaStat.st_mtim.tv_sec;
+    area.fileMtimeNsec = areaStat.st_mtim.tv_nsec;
+    TRACE("file area mapped on restart, not saved: addr={} size={} name={}",
+          (void *)area.addr, area.size, area.name);
+    writeAreaHeader(fd, &area);
   } else {
     ASSERT(strlen(area.name) > 0,
            "checkpoint file-backed area has an empty path: addr={} size={}",

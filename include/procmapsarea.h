@@ -66,7 +66,11 @@ typedef char *VA;  /* VA = virtual address */
 typedef enum ProcMapsAreaProperties {
   DMTCP_ZERO_PAGE                  = 0x0001,
   DMTCP_ZERO_PAGE_PARENT_HEADER    = 0x0002,
-  DMTCP_ZERO_PAGE_CHILD_HEADER     = 0x0004
+  DMTCP_ZERO_PAGE_CHILD_HEADER     = 0x0004,
+  // The area is the file's own pages (a private mapping nothing wrote): the
+  // image holds no data for it, and the restart maps the file again after
+  // checking it is the one checkpointed (fileSize, fileMtime).
+  DMTCP_FILE_MAPPED                = 0x0008
 } ProcMapsAreaProperties;
 
 typedef union ProcMapsArea {
@@ -112,6 +116,12 @@ typedef union ProcMapsArea {
     uint64_t properties;
 
     char name[FILENAMESIZE];
+
+    // DMTCP_FILE_MAPPED: the file at checkpoint time.  After the name, in
+    // what was padding, so that images without them still read.
+    uint64_t fileSize;
+    int64_t fileMtimeSec;
+    int64_t fileMtimeNsec;
   };
   char _padding[4096];
 } ProcMapsArea;

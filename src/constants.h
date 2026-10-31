@@ -143,6 +143,11 @@
 // reports) and always uses ioctl(PAGEMAP_SCAN).
 #define ENV_VAR_DISABLE_PAGEMAP_SCAN    "DMTCP_DISABLE_PAGEMAP_SCAN"
 
+// Set to "1" to save the pages of every file mapping in the image, as before
+// DMTCP_FILE_MAPPED, instead of mapping unmodified ones from their file on
+// restart.
+#define ENV_VAR_DISABLE_FILE_MAPPED     "DMTCP_DISABLE_FILE_MAPPED"
+
 // this list should be kept up to date with all "protected" environment vars
 #define ENV_VARS_ALL                  \
   ENV_VAR_NAME_HOST,                  \
@@ -181,6 +186,7 @@
   ENV_VAR_REAL_PPID,                  \
   ENV_VAR_FSGSBASE_ENABLED,           \
   ENV_VAR_DISABLE_PAGEMAP_SCAN,       \
+  ENV_VAR_DISABLE_FILE_MAPPED,        \
   ENV_VAR_LOG_FILE
 
 #define DMTCP_RESTART_CMD       "dmtcp_restart"

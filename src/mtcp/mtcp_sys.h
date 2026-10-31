@@ -253,6 +253,9 @@ struct linux_dirent {
 # define mtcp_sys_open2(args ...)     mtcp_sys_open(args, 0777)
 # define mtcp_sys_ftruncate(args ...) mtcp_inline_syscall(ftruncate, 2, args)
 # define mtcp_sys_close(args ...)     mtcp_inline_syscall(close, 1, args)
+// fstat() through newfstatat(), which every architecture has.
+# define mtcp_sys_fstat(fd, statbuf) \
+  mtcp_inline_syscall(newfstatat, 4, fd, "", statbuf, AT_EMPTY_PATH)
 # if defined(__aarch64__)
 #  define mtcp_sys_access(path, mode) \
   mtcp_inline_syscall(faccessat, 4, AT_FDCWD, path, mode, AT_EACCESS)

@@ -262,6 +262,13 @@ bool areZeroPages(void *addr, size_t numPages);
 bool scanOccupiedRangeBatch(uintptr_t start, uintptr_t end,
                             uintptr_t *size_scanned);
 
+// True if [start, end), a private file mapping, has a page that is no longer
+// the file's: written through copy-on-write (a library's RELRO after
+// relocation, a text page a debugger patched) or swapped out.  Such an area's
+// contents are not the file's, so the checkpoint must save them.  Reports
+// true when the pagemap cannot be inspected.
+bool areaHasPrivatePages(uintptr_t start, uintptr_t end);
+
 // Linux 6.13+; defined for build environments whose headers predate them.
 #ifndef MADV_GUARD_INSTALL
 # define MADV_GUARD_INSTALL 102
