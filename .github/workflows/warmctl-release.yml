@@ -39,7 +39,7 @@ jobs:
           persist-credentials: false
       - name: Build
         run: |
-          ./configure --prefix=/opt/warmctl/dmtcp
+          ./configure --prefix=/opt/warmctl/dmtcp --docdir=/opt/warmctl/dmtcp/share/doc/dmtcp
           make -j2
           make tests -j2
       - name: Check memory readers and checkpoint bytes
@@ -56,11 +56,11 @@ jobs:
           install -m 0644 COPYING.LESSER "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/share/doc/dmtcp/"
           mkdir -p dist
           printf 'release=%s\ncommit=%s\nupstream_version=%s\nos=debian-12\narch=%s\nprefix=/opt/warmctl/dmtcp\n' \
-            "$TAG" "$(git rev-parse HEAD)" "$(cat VERSION)" "$ARCH" > "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/BUILDINFO"
+            "$TAG" "$GITHUB_SHA" "$(cat VERSION)" "$ARCH" > "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/BUILDINFO"
           ldd --version | head -1 >> "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/BUILDINFO"
           tar -czf "dist/dmtcp-$TAG-linux-$ARCH-debian12.tar.gz" -C "$RUNNER_TEMP/stage/opt/warmctl" dmtcp
           if [ "$ARCH" = amd64 ]; then
-            git archive --format=tar.gz --prefix="dmtcp-$TAG/" HEAD > "dist/dmtcp-$TAG-source.tar.gz"
+            git -c safe.directory="$GITHUB_WORKSPACE" archive --format=tar.gz --prefix="dmtcp-$TAG/" HEAD > "dist/dmtcp-$TAG-source.tar.gz"
           fi
           (cd dist && sha256sum *.tar.gz > "dmtcp-$TAG-linux-$ARCH-checksums.txt")
       - name: Verify packaged runtime
