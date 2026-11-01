@@ -25,7 +25,10 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
-    container: debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+    container:
+      image: debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+      # Restored process trees are adopted by PID 1; reap them in this test container.
+      options: --init
     timeout-minutes: 30
     steps:
       - name: Install native build dependencies
