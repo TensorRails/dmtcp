@@ -37,9 +37,14 @@ DMTCP_RESTART_HUGEPAGES=1 DMTCP_RESTART_READERS=16 DMTCP_RESTART_MMAP=0 \
 
 The switches are opt-in in DMTCP itself. THP and reader count depend on RAM,
 CPU and storage; compressed streams use ordinary reading. The binary asset
-targets Ubuntu 24.04 x86-64 or ARM64 and excludes warmctl's fdkeep plugin.
+targets Ubuntu 24.04 x86-64 or ARM64 and includes the warmctl fdkeep plugin.
+The plugin now lives in this fork and has native syscall implementations and
+CPU descriptor-restoration tests on both architectures.
 Both architectures run native CPU checkpoint/restore tests; the H200 results
 apply to x86-64. ARM64 currently uses the ordinary reader with optional THP,
 and GPU serving is not qualified on ARM64. These are Linux packages, not
 macOS/Windows binaries. Use identical
 runtime libraries for bake and restore; bake new snapshots after upgrading.
+
+ARM64 checkpoint creation keeps the upstream gzip-disable safeguard. CI also
+checks restoration of an externally compressed owned fixture on both platforms.

@@ -22,8 +22,9 @@ release, update those notes in the PR. Keep the historical `warmctl` branch
 fast-forwarded to the released commit for consumers still using that branch.
 
 The binary archive contains `dmtcp/`, to extract under `/opt/warmctl`.
-It does not include warmctl's fdkeep plugin or cuInterpose. Build fdkeep from
-the warmctl revision paired with the runtime. The archive requires Ubuntu
+It includes the separately licensed warmctl fdkeep plugin; cuInterpose is a
+separate GPU dependency. fdkeep is built from plugin/fdkeep and tested on both
+release architectures. The archive requires Ubuntu
 24.04-compatible glibc and libstdc++ on the matching architecture; it is not a
 portable Linux binary. DMTCP runs on Linux, not macOS or Windows. Parallel
 pread helpers currently support x86-64 only; ARM64 uses the ordinary reader

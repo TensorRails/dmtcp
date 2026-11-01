@@ -46,6 +46,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           make install DESTDIR="$RUNNER_TEMP/stage"
+          make -C plugin/fdkeep install DESTDIR="$RUNNER_TEMP/stage"
           mkdir -p dist
           printf 'release=%s\ncommit=%s\nupstream_version=%s\nos=ubuntu-24.04\narch=%s\nprefix=/opt/warmctl/dmtcp\n' \
             "$TAG" "$(git rev-parse HEAD)" "$(cat VERSION)" "$ARCH" > "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/BUILDINFO"
@@ -60,7 +61,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/relocated"
           tar -xzf dist/*-linux-${{ matrix.arch }}-ubuntu24.04.tar.gz -C "$RUNNER_TEMP/relocated"
           "$RUNNER_TEMP/relocated/dmtcp/bin/dmtcp_launch" --version
-          python3 test/restore-memory-check.py --root "$RUNNER_TEMP/relocated/dmtcp" --output "$RUNNER_TEMP/package-check"
+          python3 test/restore-memory-check.py --root "$RUNNER_TEMP/relocated/dmtcp" \
+            --plugin "$RUNNER_TEMP/relocated/dmtcp/lib/libdmtcp_fdkeep.so" --output "$RUNNER_TEMP/package-check"
       - name: Archive test logs
         if: always()
         run: |

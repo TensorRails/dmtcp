@@ -5,6 +5,7 @@ Run after make, with --root pointing to the build or installed prefix.
 Only this runner's coordinators/processes are stopped. Logs survive failures.
 """
 import argparse
+import gzip
 import hashlib
 import os
 import platform
@@ -75,15 +76,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--plugin', type=Path)
     args = parser.parse_args()
     root, output = args.root.resolve(), args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     source = Path(__file__).resolve().parent
-    for fixture in ('restore-memory-bench', 'restore-partial-file'):
+    for fixture in ('restore-memory-bench', 'restore-partial-file', 'restore-fdkeep'):
         subprocess.run(['gcc', '-O2', '-I' + str(source.parent / 'include'),
                         str(source / (fixture + '.c')), '-o', str(output / fixture)], check=True)
     # Last entries exercise both the old scan-length bug and prefix matching.
     env = dict(os.environ)
+    if args.plugin:
+        env['DMTCP_PLUGIN'] = str(args.plugin.resolve())
     env.update(DMTCP_RESTART_PROFILE='1', DMTCP_RESTART_MMAP='0',
                DMTCP_RESTART_READERS='1', DMTCP_RESTART_HUGEPAGES='0',
                DMTCP_BENCH_RESTART_ENV_SUFFIX='wrong', DMTCP_BENCH_RESTART_ENV='donor')
@@ -104,14 +108,20 @@ def main():
         for d in (first, second, tmp):
             d.mkdir()
         env.update(DMTCP_TMPDIR=str(tmp), DMTCP_BENCH_SECOND_DIR=str(second),
-                   DMTCP_BENCH_RESTART_ENV='donor', DMTCP_GZIP='1' if compressed else '0')
-        run(root, case / 'checkpoint.log', ['dmtcp_launch',
-            *([] if compressed else ['--no-gzip']), '--ckptdir', str(first),
+                   DMTCP_BENCH_RESTART_ENV='donor', DMTCP_GZIP='0')
+        run(root, case / 'checkpoint.log', ['dmtcp_launch', '--no-gzip', '--ckptdir', str(first),
             str(output / 'restore-memory-bench'), str(mib),
             'sparse' if sparse else 'dense', 'cow'], env)
         files = images(first)
         if compressed:
+            # ARM64's launcher deliberately disables gzip at checkpoint due to
+            # an upstream SIGRETURN limitation. Compress our owned raw fixture
+            # externally to test the restart pipe/fallback on both platforms.
             for name in files:
+                zipped = name + '.gz.tmp'
+                with open(name, 'rb') as src, gzip.open(zipped, 'wb', compresslevel=1) as dst:
+                    shutil.copyfileobj(src, dst, 8 * 1024 * 1024)
+                os.replace(zipped, name)
                 with open(name, 'rb') as f:
                     assert f.read(2) == b'\x1f\x8b', 'gzip case must use a compressed image'
         before = digests(files)
@@ -145,6 +155,17 @@ def main():
     for f in case.glob('ckpt_*.dmtcp'):
         f.unlink()
     print('partial-file: PASS (private dirty bytes past EOF)', flush=True)
+    if args.plugin:
+        case = output / 'fdkeep'
+        case.mkdir()
+        env.update(DMTCP_TMPDIR=str(case), DMTCP_RESTART_MMAP='0', DMTCP_GZIP='0')
+        run(root, case / 'checkpoint.log', ['dmtcp_launch', '--no-gzip', '--ckptdir',
+            str(case), str(output / 'restore-fdkeep')], env)
+        text = run(root, case / 'restart.log', ['dmtcp_restart', *images(case)], env)
+        assert 'FDKEEP_VERIFIED' in text, text[-6000:]
+        for f in case.glob('ckpt_*.dmtcp'):
+            f.unlink()
+        print('fdkeep: PASS (eventfd, pipe bytes, Unix listener, epoll watch)', flush=True)
 
 
 if __name__ == '__main__':
