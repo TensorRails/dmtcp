@@ -141,3 +141,14 @@ When moving a deferred test into the new harness, record:
 - host-sensitive skip reason
 - artifact needs, especially PTY, MPI, or external-service logs
 - whether the test passes on `main` before treating it as a branch gate
+# TensorRails fork regressions
+
+These tests were added by the shipped warmctl branch and have no old-harness
+equivalent. They are part of the authoritative registry and run in `make check`.
+
+| Test | Coverage |
+| --- | --- |
+| `dlopen-origin` | Resolve `$ORIGIN` for the original dlopen caller. |
+| `fcntl64-dup` | Track CPython-style fcntl64 descriptor duplication. |
+| `sem-unlinked-shared` | Restore shared semaphores whose files were already unlinked. |
+| `setsockopt-race` | Keep a socket connection locked while updating its options. |
