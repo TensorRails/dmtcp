@@ -370,8 +370,11 @@ FileConnList::resume(bool isRestart)
 
   if (isRestart) {
     // Now unlink the files that we created as a side-effect of restoreShmArea.
+    // Processes that share an area all recreated the same file in refill, so
+    // every one but the first finds it already unlinked here.
     for (size_t i = 0; i < missingUnlinkedShmFiles.size(); i++) {
-      WARN_NE(-1, unlink(missingUnlinkedShmFiles[i].name),
+      int rc = unlink(missingUnlinkedShmFiles[i].name);
+      WARN_ERRNO(rc == 0 || errno == ENOENT,
         "The file was unlinked at checkpoint, but unlinking it after restart "
         "failed: path={}",
         missingUnlinkedShmFiles[i].name);

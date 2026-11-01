@@ -2014,6 +2014,7 @@ class TestRegistry:
             TestSpec("dlopen1", 1, ["./test/dlopen1"]),
             TestSpec("dlopen-origin", 1, ["./test/dlopen-origin"]),
             TestSpec("fcntl64-dup", 2, ["./test/fcntl64-dup"]),
+            TestSpec("sem-unlinked-shared", 2, ["./test/sem-unlinked-shared"]),
             TestSpec("dmtcp5", 2, ["./test/dmtcp5"]),
             TestSpec("syscall-tester", 1,
                      ["--checkpoint-open-files ./test/syscall-tester"],
