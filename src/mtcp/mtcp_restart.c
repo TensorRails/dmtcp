@@ -51,6 +51,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/time.h>
+#include <sys/resource.h>
+#include <sys/prctl.h>
+#include <time.h>
 #include <unistd.h>
 #include <stddef.h>
 
@@ -225,6 +228,16 @@ mtcp_restart_process_args(int argc, char *argv[], char **environ, void (*restore
   rinfo.use_gdb = 0;
 
   rinfo.dprintfEnabled = mtcp_parse_dprintf_env(environ);
+  char *profile = mtcp_getenv("DMTCP_RESTART_PROFILE", environ);
+  rinfo.profileRestart = profile && mtcp_strcmp(profile, "1") == 0;
+  char *huge = mtcp_getenv("DMTCP_RESTART_HUGEPAGES", environ);
+  rinfo.restartHugePages = huge && mtcp_strcmp(huge, "1") == 0;
+  char *mapImage = mtcp_getenv("DMTCP_RESTART_MMAP", environ);
+  rinfo.restartMmap = mapImage && mtcp_strcmp(mapImage, "1") == 0;
+  char *readers = mtcp_getenv("DMTCP_RESTART_READERS", environ);
+  rinfo.restartReaders = readers && readers[0] >= '2' && readers[0] <= '8' &&
+    readers[1] == '\0' ? readers[0] - '0' : 1;
+  if (readers && mtcp_strcmp(readers, "16") == 0) rinfo.restartReaders = 16;
 
   char *restart_pause_str = mtcp_getenv("DMTCP_RESTART_PAUSE", environ);
   if (restart_pause_str == NULL) {
@@ -828,13 +841,197 @@ mtcp_restore_vdso_vvar(RestoreInfo *rinfo)
  *       file.  MAP_ANONYMOUS is not currently POSIX.)
  *
  **************************************************************************/
+// Raw syscalls only: libc and the original globals are unavailable here.
+static uint64_t
+restart_time_us(void)
+{
+  int mtcp_sys_errno;
+  struct timespec ts;
+  if (mtcp_inline_syscall(clock_gettime, 2, CLOCK_MONOTONIC, &ts) < 0) {
+    return 0;
+  }
+  return (uint64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+#if defined(__x86_64__)
+// These short-lived helpers share only the address space. They have separate
+// stacks and fd tables, use raw syscalls only, and are reaped before restoring
+// another region or resuming DMTCP. No libc, TLS, pthreads, or persistent pool.
+// The assembly trampoline is necessary: a raw clone returns on a NEW stack.
+// Returning into a normal C caller in the child would use the wrong frame.
+extern long mtcp_read_clone(int (*fn)(void *), void *stack, void *arg)
+  __attribute__((visibility("hidden")));
+__asm__(".text\n"
+        ".type mtcp_read_clone,@function\n"
+        ".hidden mtcp_read_clone\n"
+        "mtcp_read_clone:\n"
+        "and $-16,%rsi\n"
+        "sub $16,%rsi\n"
+        "mov %rdi,(%rsi)\n"
+        "mov %rdx,8(%rsi)\n"
+        "mov $273,%edi\n"       // CLONE_VM | SIGCHLD on Linux x86-64
+        "xor %edx,%edx\n"
+        "xor %r10d,%r10d\n"
+        "xor %r8d,%r8d\n"
+        "mov $56,%eax\n"        // __NR_clone on Linux x86-64
+        "syscall\n"
+        "test %rax,%rax\n"
+        "jnz 1f\n"
+        "pop %rax\n"
+        "pop %rdi\n"
+        "call *%rax\n"
+        "mov %eax,%edi\n"
+        "mov $60,%eax\n"        // __NR_exit, not exit_group
+        "syscall\n"
+        "ud2\n"
+        "1: ret\n"
+        ".size mtcp_read_clone,.-mtcp_read_clone\n");
+
+typedef struct {
+  int fd;
+  char *address;
+  size_t size;
+  off_t offset;
+  volatile int result;
+  pid_t parent;
+} RestartReadJob;
+
+static int
+restart_read_job(void *raw)
+{
+  int mtcp_sys_errno;
+  RestartReadJob *job = (RestartReadJob *) raw;
+  size_t done = 0;
+  while (done < job->size) {
+    size_t chunk = job->size - done;
+    if (chunk > 64 * 1024 * 1024) chunk = 64 * 1024 * 1024;
+    long n = mtcp_inline_syscall(pread64, 4, job->fd, job->address + done,
+                                 chunk, job->offset + done);
+    if (n < 0 && mtcp_sys_errno == EINTR) continue;
+    if (n <= 0) return job->result = 1;
+    done += n;
+  }
+  return job->result = 0;
+}
+
+static int
+restart_read_child(void *raw)
+{
+  int mtcp_sys_errno;
+  RestartReadJob *job = (RestartReadJob *) raw;
+  // A canceled restore must not leave a helper holding its address space.
+  // Recheck the parent after arming the signal to close the creation race.
+  if (mtcp_inline_syscall(prctl, 5, PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) < 0 ||
+      mtcp_sys_getppid() != job->parent) return job->result = 1;
+  return restart_read_job(raw);
+}
+#endif
+
+static int
+restart_parallel_read(RestoreInfo *rinfo, int fd, void *address, size_t size)
+{
+#if defined(__x86_64__)
+  int mtcp_sys_errno;
+  if (rinfo->restartReaders <= 1 || !rinfo->restartImageRegular ||
+      size < 1024UL * 1024 * 1024) return 0;
+  off_t offset = mtcp_sys_lseek(fd, 0, SEEK_CUR);
+  if (offset < 0) return 0;
+  const size_t stackSize = 64 * 1024;
+  int readers = rinfo->restartReaders;
+  char *stacks = mtcp_sys_mmap(NULL, stackSize * (readers - 1),
+                              PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (stacks == MAP_FAILED) return 0;
+  RestartReadJob jobs[16];
+  long pids[16];
+  const size_t huge = 2 * 1024 * 1024;
+  size_t stride = ((size + readers - 1) / readers + huge - 1) & ~(huge - 1);
+  pid_t parent = mtcp_sys_getpid();
+  for (int i = 0; i < readers; i++) {
+    size_t start = stride * i;
+    size_t length = size > start ? size - start : 0;
+    if (length > stride) length = stride;
+    jobs[i] = (RestartReadJob){fd, (char *) address + start,
+                              length, offset + start, -1, parent};
+    pids[i] = i + 1 < readers ?
+      mtcp_read_clone(restart_read_child, stacks + stackSize * (i + 1), &jobs[i]) : -1;
+  }
+  // Failed clone calls fall back to doing that helper's range in the parent.
+  for (int i = 0; i < readers; i++) {
+    if (pids[i] < 0) restart_read_job(&jobs[i]);
+  }
+  int ok = 1;
+  for (int i = 0; i < readers; i++) {
+    if (pids[i] > 0) {
+      int status = 0;
+      struct rusage usage;
+      long waited;
+      do {
+        waited = mtcp_sys_wait4(pids[i], &status, 0, &usage);
+      } while (waited < 0 && mtcp_sys_errno == EINTR);
+      // Never unmap a stack or resume while a helper might still be alive.
+      MTCP_ASSERT(waited == pids[i]);
+      if (status != 0) ok = 0;
+      rinfo->profileChildMinorFaults += usage.ru_minflt;
+      rinfo->profileChildMajorFaults += usage.ru_majflt;
+    }
+    if (jobs[i].result != 0) ok = 0;
+  }
+  MTCP_ASSERT(mtcp_sys_munmap(stacks, stackSize * (readers - 1)) == 0);
+  if (!ok) return 0; // pread did not move fd: the ordinary reader can retry.
+  MTCP_ASSERT(mtcp_sys_lseek(fd, offset + size, SEEK_SET) == offset + size);
+  rinfo->profileParallelBytes += size;
+  return 1;
+#else
+  return 0;
+#endif
+}
+
 void
 mtcp_readmemoryareas(RestoreInfo *rinfo, int fd, VA endOfStack)
 {
+  int mtcp_sys_errno;
+  struct rusage before, after;
+  uint64_t start = 0;
+  int usage_ok = 0;
+  rinfo->profileReadBytes = rinfo->profileReadUs = rinfo->profileMapUs = 0;
+  rinfo->profileAreas = rinfo->profileHugeAdvice = rinfo->profileHugeFailed = 0;
+  rinfo->profileFilemapBytes = rinfo->profileFilemapUs = 0;
+  rinfo->profileParallelBytes = rinfo->profileChildMinorFaults = 0;
+  rinfo->profileChildMajorFaults = 0;
+  rinfo->mmapParentStart = rinfo->mmapParentEnd = 0;
+  struct stat imageStat;
+  rinfo->restartImageRegular = (rinfo->restartMmap || rinfo->restartReaders > 1) &&
+    mtcp_sys_fstat(fd, &imageStat) == 0 && S_ISREG(imageStat.st_mode);
+  if (rinfo->profileRestart) {
+    start = restart_time_us();
+    usage_ok = mtcp_inline_syscall(getrusage, 2, RUSAGE_SELF, &before) == 0;
+  }
   while (1) {
     if (read_one_memory_area(rinfo, fd, endOfStack) == -1) {
       break; /* error */
     }
+  }
+  if (rinfo->profileRestart) {
+    uint64_t elapsed = restart_time_us() - start;
+    usage_ok = usage_ok &&
+      mtcp_inline_syscall(getrusage, 2, RUSAGE_SELF, &after) == 0;
+    MTCP_PRINTF("DMTCP_PROFILE pid=%d virtual_pid=%d phase=memory total_us=%u read_us=%u "
+                "map_us=%u read_kib=%u areas=%u minflt=%u majflt=%u "
+                "usage_ok=%u huge_advice=%u huge_failed=%u "
+                "filemap_kib=%u filemap_us=%u readers=%u parallel_kib=%u "
+                "child_minflt=%u child_majflt=%u\n",
+                mtcp_sys_getpid(), rinfo->ckptHdr.pid, (unsigned) elapsed,
+                (unsigned) rinfo->profileReadUs, (unsigned) rinfo->profileMapUs,
+                (unsigned) (rinfo->profileReadBytes / 1024), rinfo->profileAreas,
+                usage_ok ? (unsigned) (after.ru_minflt - before.ru_minflt) : 0,
+                usage_ok ? (unsigned) (after.ru_majflt - before.ru_majflt) : 0,
+                usage_ok, rinfo->profileHugeAdvice, rinfo->profileHugeFailed,
+                (unsigned) (rinfo->profileFilemapBytes / 1024),
+                (unsigned) rinfo->profileFilemapUs, rinfo->restartReaders,
+                (unsigned) (rinfo->profileParallelBytes / 1024),
+                (unsigned) rinfo->profileChildMinorFaults,
+                (unsigned) rinfo->profileChildMajorFaults);
   }
 #if defined(__arm__) || defined(__aarch64__)
 
@@ -899,6 +1096,7 @@ read_one_memory_area(RestoreInfo *rinfo, int fd, VA endOfStack)
   if (area.addr == NULL) {
     return -1;
   }
+  rinfo->profileAreas++;
 
   if (area.properties & DMTCP_FILE_MAPPED) {
     restore_file_mapped_area(rinfo, &area);
@@ -1056,12 +1254,33 @@ read_one_memory_area(RestoreInfo *rinfo, int fd, VA endOfStack)
         }
         MTCP_ASSERT(imagefd == -1);  // anonymous memory region
       }
+      uint64_t mapStart = rinfo->profileRestart ? restart_time_us() : 0;
       mmappedat =
         mmap_fixed_noreplace(rinfo, area.addr, area.size,
                             area.prot | PROT_WRITE,
                             mmapFlags, imagefd, area.offset);
 
       MTCP_ASSERT(mmappedat == area.addr);
+      if (area.properties & DMTCP_ZERO_PAGE_PARENT_HEADER) {
+        rinfo->mmapParentStart = (uint64_t) area.addr;
+        rinfo->mmapParentEnd = (uint64_t) area.endAddr;
+      }
+      if (rinfo->profileRestart) {
+        rinfo->profileMapUs += restart_time_us() - mapStart;
+      }
+
+      // Opt-in experiment: first-touch allocation in large private anonymous
+      // regions. No MAP_POPULATE, no eager touching of zero runs, no change to
+      // addresses or checkpoint bytes. Unsupported advice leaves the old path.
+      if (rinfo->restartHugePages && (mmapFlags & MAP_ANONYMOUS) &&
+          (mmapFlags & MAP_PRIVATE) && !(mmapFlags & MAP_GROWSDOWN) &&
+          area.size >= 2 * 1024 * 1024) {
+        rinfo->profileHugeAdvice++;
+        if (mtcp_inline_syscall(madvise, 3, area.addr, area.size,
+                               MADV_HUGEPAGE) < 0) {
+          rinfo->profileHugeFailed++;
+        }
+      }
 
   #if 0
       /*
@@ -1088,12 +1307,70 @@ read_one_memory_area(RestoreInfo *rinfo, int fd, VA endOfStack)
        */
 
       /* ANALYZE THE CONDITION FOR DOING mmapfile MORE CAREFULLY. */
+      uint64_t readStart = rinfo->profileRestart ? restart_time_us() : 0;
+      size_t readSize = area.size;
       if (area.mmapFileSize > 0 && area.name[0] == '/') {
         DPRINTF(rinfo, "restoring memory region %p of %p bytes at %p\n",
                     area.mmapFileSize, area.size, area.addr);
-        mtcp_readfile(fd, area.addr, area.mmapFileSize);
-      } else {
-        mtcp_readfile(fd, area.addr, area.size);
+        readSize = area.mmapFileSize;
+      }
+      int mappedImage = 0;
+      int mmapEligible = 0;
+      int imageOffsetMod = -1;
+      int mmapError = 0;
+      // Experimental mmap path for LARGE raw anonymous payloads only. The
+      // parent header has already reserved these addresses, including zero
+      // children. Replace only our own reservation, never an unrelated VMA.
+      // MAP_PRIVATE preserves the immutable snapshot when the process writes.
+      // Leave pipes/compression, stacks, partial file-backed payloads and small
+      // mappings on the ordinary reader. Do not confuse a parent header with
+      // payload data (the old compile-time FAST_RST_VIA_MMAP path does).
+      int child = area.properties & DMTCP_ZERO_PAGE_CHILD_HEADER;
+      int owned = !child ||
+        ((uint64_t) area.addr >= rinfo->mmapParentStart &&
+         (uint64_t) area.endAddr <= rinfo->mmapParentEnd);
+      if (rinfo->restartMmap && rinfo->restartImageRegular && owned &&
+          (area.flags & MAP_ANONYMOUS) && (area.flags & MAP_PRIVATE) &&
+          !(area.flags & MAP_GROWSDOWN) && area.name[0] != '/' &&
+          readSize == area.size && readSize >= 64 * 1024 * 1024) {
+        mmapEligible = 1;
+        off_t offset = mtcp_sys_lseek(fd, 0, SEEK_CUR);
+        if (offset >= 0) imageOffsetMod = offset % MTCP_PAGE_SIZE;
+        if (offset >= 0 && offset % MTCP_PAGE_SIZE == 0) {
+          void *mapped = mtcp_sys_mmap(area.addr, readSize, area.prot,
+                                      MAP_PRIVATE | MAP_FIXED, fd, offset);
+          if (mapped != MAP_FAILED) {
+            MTCP_ASSERT(mapped == area.addr);
+            MTCP_ASSERT(mtcp_sys_lseek(fd, readSize, SEEK_CUR) >= 0);
+            mappedImage = 1;
+          } else {
+            mmapError = mtcp_sys_errno;
+          }
+        }
+      }
+      int parallelRead = !mappedImage &&
+        restart_parallel_read(rinfo, fd, area.addr, readSize);
+      if (!mappedImage && !parallelRead) {
+        mtcp_readfile(fd, area.addr, readSize);
+      }
+      if (rinfo->profileRestart) {
+        uint64_t us = restart_time_us() - readStart;
+        if (mappedImage) {
+          rinfo->profileFilemapUs += us;
+          rinfo->profileFilemapBytes += readSize;
+        } else {
+          rinfo->profileReadUs += us;
+          rinfo->profileReadBytes += readSize;
+        }
+        if (readSize >= 64 * 1024 * 1024 || us >= 10000) {
+          MTCP_PRINTF("DMTCP_PROFILE pid=%d virtual_pid=%d phase=area addr=%p read_kib=%u "
+                      "read_us=%u flags=%x properties=%x mode=%s "
+                      "mmap_eligible=%u offset_mod=%d mmap_errno=%d name=%s\n",
+                      mtcp_sys_getpid(), rinfo->ckptHdr.pid, area.addr, (unsigned) (readSize / 1024),
+                      (unsigned) us, area.flags, area.properties,
+                      mappedImage ? "mmap" : parallelRead ? "pread" : "read", mmapEligible,
+                      imageOffsetMod, mmapError, area.name);
+        }
       }
 
       if (!(area.prot & PROT_WRITE)) {

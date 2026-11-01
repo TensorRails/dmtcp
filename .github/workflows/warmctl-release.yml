@@ -1,0 +1,84 @@
+name: warmctl release
+
+on:
+  pull_request:
+    branches: [main, warmctl]
+  push:
+    tags: ['v*-warmctl.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-amd64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build
+        run: |
+          ./configure --prefix=/opt/warmctl/dmtcp
+          make -j2
+          make tests -j2
+      - name: Check memory readers and checkpoint bytes
+        run: python3 test/restore-memory-check.py --root . --output "$RUNNER_TEMP/memory-check"
+      - name: Existing process, thread and memory regressions
+        run: DMTCP_RESTART_HUGEPAGES=1 DMTCP_RESTART_READERS=16 python3 test/autotest.py --retry-once --jobs 2 file1 file3 mmap1 mmap-noreserve zeropages zeropages-pread pthread1 forkexec sysv-shm1 modify-env
+      - name: Package installed runtime and source
+        env:
+          TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'snapshot' }}
+        run: |
+          make install DESTDIR="$RUNNER_TEMP/stage"
+          mkdir -p dist
+          printf 'release=%s\ncommit=%s\nupstream_version=%s\nos=ubuntu-24.04\narch=x86_64\nprefix=/opt/warmctl/dmtcp\n' \
+            "$TAG" "$(git rev-parse HEAD)" "$(cat VERSION)" > "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/BUILDINFO"
+          ldd --version | head -1 >> "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/BUILDINFO"
+          tar -czf "dist/dmtcp-$TAG-linux-amd64-ubuntu24.04.tar.gz" -C "$RUNNER_TEMP/stage/opt/warmctl" dmtcp
+          git archive --format=tar.gz --prefix="dmtcp-$TAG/" HEAD > "dist/dmtcp-$TAG-source.tar.gz"
+          (cd dist && sha256sum *.tar.gz > "dmtcp-$TAG-checksums.txt")
+      - name: Verify packaged runtime
+        run: |
+          sudo mkdir -p /opt/warmctl
+          sudo tar -xzf dist/*-linux-amd64-ubuntu24.04.tar.gz -C /opt/warmctl
+          /opt/warmctl/dmtcp/bin/dmtcp_launch --version
+          python3 test/restore-memory-check.py --root /opt/warmctl/dmtcp --output "$RUNNER_TEMP/package-check"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: dmtcp-linux-amd64
+          path: |
+            dist/
+            ${{ runner.temp }}/memory-check/**/*.log
+            ${{ runner.temp }}/package-check/**/*.log
+          retention-days: 14
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: linux-amd64
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dmtcp-linux-amd64
+          path: artifacts
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: artifacts/**/*.tar.gz
+      - name: Publish fork prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mapfile -t assets < <(find artifacts -type f \( -name '*.tar.gz' -o -name '*checksums.txt' \))
+          gh release create "$TAG" "${assets[@]}" --verify-tag --prerelease --title "DMTCP $TAG" --notes-file doc/warmctl-release-notes.md

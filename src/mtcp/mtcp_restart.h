@@ -134,6 +134,27 @@ typedef struct RestoreInfo {
   DmtcpCkptHeader ckptHdr;
 
   char ckptImage[PATH_MAX];
+
+  // Restart-only diagnostics/options; not part of the checkpoint format.
+  // Keep these in the relocated RestoreInfo, never in unmapped globals.
+  int profileRestart;
+  int restartHugePages;
+  uint64_t profileReadBytes;
+  uint64_t profileReadUs;
+  uint64_t profileMapUs;
+  unsigned profileAreas;
+  unsigned profileHugeAdvice;
+  unsigned profileHugeFailed;
+  int restartMmap;
+  int restartImageRegular;
+  uint64_t mmapParentStart;
+  uint64_t mmapParentEnd;
+  uint64_t profileFilemapBytes;
+  uint64_t profileFilemapUs;
+  int restartReaders;
+  uint64_t profileParallelBytes;
+  uint64_t profileChildMinorFaults;
+  uint64_t profileChildMajorFaults;
 } RestoreInfo;
 
 // int mtcp_restart_process_args(RestoreInfo *rinfo, int argc, char *argv[], char **environ);

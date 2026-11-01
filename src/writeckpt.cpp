@@ -731,6 +731,17 @@ writememoryarea(int fd, Area area)
         off_t availBytes = areaStat.st_size - area.offset;
         if (availBytes > 0) {
           area.mmapFileSize = availBytes;
+          // A regular file's final partial page is readable up to its page
+          // boundary; only whole pages beyond EOF fault. Save that complete
+          // page, including any private dirty tail. Besides preserving those
+          // bytes, this keeps subsequent raw checkpoint payloads page-aligned
+          // so mtcp_restart can mmap them. Existing readers already honor
+          // mmapFileSize, so no checkpoint-format change is needed.
+          if (S_ISREG(areaStat.st_mode)) {
+            area.mmapFileSize = (availBytes + MTCP_PAGE_SIZE - 1) & MTCP_PAGE_MASK;
+            ASSERT_LE(area.mmapFileSize, area.size,
+                      "rounded final file page exceeds mapping");
+          }
         } else {
           area.mmapFileSize = 0;
         }
