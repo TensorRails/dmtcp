@@ -46,14 +46,26 @@ jobs:
           sudo tar -xzf dist/*-linux-amd64-ubuntu24.04.tar.gz -C /opt/warmctl
           /opt/warmctl/dmtcp/bin/dmtcp_launch --version
           python3 test/restore-memory-check.py --root /opt/warmctl/dmtcp --output "$RUNNER_TEMP/package-check"
+      - name: Archive test logs
+        if: always()
+        run: |
+          mkdir -p dist
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import tarfile
+          root = Path(os.environ['RUNNER_TEMP'])
+          with tarfile.open('dist/test-logs.tgz', 'w:gz') as archive:
+              for name in ('memory-check', 'package-check'):
+                  for log in (root / name).rglob('*.log'):
+                      archive.add(log, arcname=str(log.relative_to(root)))
+          PY
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: dmtcp-linux-amd64
-          path: |
-            dist/
-            ${{ runner.temp }}/memory-check/**/*.log
-            ${{ runner.temp }}/package-check/**/*.log
+          path: dist/
+          if-no-files-found: error
           retention-days: 14
 
   publish:
