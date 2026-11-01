@@ -25,8 +25,11 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
+    container: debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
     timeout-minutes: 30
     steps:
+      - name: Install native build dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends build-essential python3 git ca-certificates gzip zstd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -47,11 +50,12 @@ jobs:
         run: |
           make install DESTDIR="$RUNNER_TEMP/stage"
           make -C plugin/fdkeep install DESTDIR="$RUNNER_TEMP/stage"
+          install -m 0644 COPYING.LESSER "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/share/doc/dmtcp/"
           mkdir -p dist
-          printf 'release=%s\ncommit=%s\nupstream_version=%s\nos=ubuntu-24.04\narch=%s\nprefix=/opt/warmctl/dmtcp\n' \
+          printf 'release=%s\ncommit=%s\nupstream_version=%s\nos=debian-12\narch=%s\nprefix=/opt/warmctl/dmtcp\n' \
             "$TAG" "$(git rev-parse HEAD)" "$(cat VERSION)" "$ARCH" > "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/BUILDINFO"
           ldd --version | head -1 >> "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/BUILDINFO"
-          tar -czf "dist/dmtcp-$TAG-linux-$ARCH-ubuntu24.04.tar.gz" -C "$RUNNER_TEMP/stage/opt/warmctl" dmtcp
+          tar -czf "dist/dmtcp-$TAG-linux-$ARCH-debian12.tar.gz" -C "$RUNNER_TEMP/stage/opt/warmctl" dmtcp
           if [ "$ARCH" = amd64 ]; then
             git archive --format=tar.gz --prefix="dmtcp-$TAG/" HEAD > "dist/dmtcp-$TAG-source.tar.gz"
           fi
@@ -59,7 +63,7 @@ jobs:
       - name: Verify packaged runtime
         run: |
           mkdir -p "$RUNNER_TEMP/relocated"
-          tar -xzf dist/*-linux-${{ matrix.arch }}-ubuntu24.04.tar.gz -C "$RUNNER_TEMP/relocated"
+          tar -xzf dist/*-linux-${{ matrix.arch }}-debian12.tar.gz -C "$RUNNER_TEMP/relocated"
           "$RUNNER_TEMP/relocated/dmtcp/bin/dmtcp_launch" --version
           python3 test/restore-memory-check.py --root "$RUNNER_TEMP/relocated/dmtcp" \
             --plugin "$RUNNER_TEMP/relocated/dmtcp/lib/libdmtcp_fdkeep.so" --output "$RUNNER_TEMP/package-check"
