@@ -95,7 +95,7 @@ def main():
              ('sparse', 257, True, 16, True, False, False),
              ('mmap', 257, False, 1, False, True, False),
              ('mmap-sparse', 257, True, 1, False, True, False),
-             ('gzip-fallback', 257, False, 16, True, False, True)]
+             ('gzip-fallback', 1025, False, 16, True, True, True)]
     for name, mib, sparse, readers, huge, mapped, compressed in cases:
         case = output / name
         case.mkdir()
@@ -109,6 +109,10 @@ def main():
             str(output / 'restore-memory-bench'), str(mib),
             'sparse' if sparse else 'dense', 'cow'], env)
         files = images(first)
+        if compressed:
+            for name in files:
+                with open(name, 'rb') as f:
+                    assert f.read(2) == b'\x1f\x8b', 'gzip case must use a compressed image'
         before = digests(files)
         env.update(DMTCP_BENCH_RESTART_ENV='receiver', DMTCP_RESTART_READERS=str(readers),
                    DMTCP_RESTART_HUGEPAGES=str(int(huge)), DMTCP_RESTART_MMAP=str(int(mapped)))
@@ -116,9 +120,10 @@ def main():
         assert 'BENCH_VERIFIED' in text, text[-6000:]
         field = 'filemap_kib' if mapped else 'parallel_kib'
         values = list(map(int, re.findall(r'\b' + field + r'=(\d+)', text)))
-        if mapped or (readers > 1 and mib >= 1024 and not sparse and not compressed):
+        if not compressed and (mapped or (readers > 1 and mib >= 1024 and not sparse)):
             assert any(values), f'{name}: optimized reader was not exercised'
         if compressed:
+            values = list(map(int, re.findall(r'\b(?:filemap_kib|parallel_kib)=(\d+)', text)))
             assert values and not any(values), 'compressed stream must use ordinary reader'
         text = run(root, case / 'second-restart.log', ['dmtcp_restart', *images(second)], env)
         assert 'BENCH_SECOND_VERIFIED' in text, text[-6000:]
