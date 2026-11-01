@@ -6,7 +6,7 @@ the tag and full commit in the installed `BUILDINFO` identify the fork build.
 Do not change the upstream checkpoint signature just to number a fork release.
 
 Merge a reviewed PR into `main`, with `Fixes #N` for its performance issue.
-The PR workflow builds on Ubuntu 24.04 x86-64, runs the memory-reader and
+The PR workflow builds natively on Ubuntu 24.04 x86-64 and ARM64, runs the memory-reader and
 process regressions, packages an installed runtime, and tests that package.
 After the checks pass, tag the merge commit and push the tag:
 
@@ -16,7 +16,7 @@ git push origin v5.0.0-warmctl.1
 ```
 
 The workflow reruns the checks and publishes a prerelease with source,
-an Ubuntu 24.04 x86-64 runtime, SHA-256 checksums and GitHub build provenance.
+Ubuntu 24.04 x86-64 and ARM64 runtimes, SHA-256 checksums and GitHub build provenance.
 Release notes come from `doc/warmctl-release-notes.md`. Before each later
 release, update those notes in the PR. Keep the historical `warmctl` branch
 fast-forwarded to the released commit for consumers still using that branch.
@@ -24,7 +24,11 @@ fast-forwarded to the released commit for consumers still using that branch.
 The binary archive contains `dmtcp/`, to extract under `/opt/warmctl`.
 It does not include warmctl's fdkeep plugin or cuInterpose. Build fdkeep from
 the warmctl revision paired with the runtime. The archive requires Ubuntu
-24.04-compatible glibc and libstdc++; it is not a portable Linux binary.
+24.04-compatible glibc and libstdc++ on the matching architecture; it is not a
+portable Linux binary. DMTCP runs on Linux, not macOS or Windows. Parallel
+pread helpers currently support x86-64 only; ARM64 uses the ordinary reader
+with optional huge pages and is CPU-tested, not GPU-qualified by this release.
+The package tests also bake and restore from a relocated installation path.
 For other runtime bases, build the tagged source inside that base as
 warmctl's runtime Dockerfile does, pinning the full commit.
 

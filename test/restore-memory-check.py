@@ -7,6 +7,7 @@ Only this runner's coordinators/processes are stopped. Logs survive failures.
 import argparse
 import hashlib
 import os
+import platform
 from pathlib import Path
 import re
 import shutil
@@ -120,8 +121,11 @@ def main():
         assert 'BENCH_VERIFIED' in text, text[-6000:]
         field = 'filemap_kib' if mapped else 'parallel_kib'
         values = list(map(int, re.findall(r'\b' + field + r'=(\d+)', text)))
-        if not compressed and (mapped or (readers > 1 and mib >= 1024 and not sparse)):
+        parallel = platform.machine() == 'x86_64' and readers > 1 and mib >= 1024 and not sparse
+        if not compressed and (mapped or parallel):
             assert any(values), f'{name}: optimized reader was not exercised'
+        if platform.machine() != 'x86_64' and not mapped:
+            assert values and not any(values), 'unsupported architecture must use ordinary reader'
         if compressed:
             values = list(map(int, re.findall(r'\b(?:filemap_kib|parallel_kib)=(\d+)', text)))
             assert values and not any(values), 'compressed stream must use ordinary reader'
