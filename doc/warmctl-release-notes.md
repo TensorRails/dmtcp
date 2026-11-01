@@ -21,7 +21,7 @@ ordinary restores took 77.36/82.14 s; huge pages + 16 readers took
 20.21/23.43/20.27/21.39 s (median 20.83 s to health, 20.92 s to first streaming
 token). In the illustrated pair, DMTCP fell from 54.09 to 4.04 s. This is not
 a 20-second SLA or a measurement of provisioning/network transfer. See
-[the measured phase breakdown](h200-restart-performance.md).
+[the measured phase breakdown](https://github.com/TensorRails/dmtcp/blob/v5.0.0-warmctl.1/doc/h200-restart-performance.md).
 
 All 20 GPU restores matched weight fingerprints and passed streaming/tool
 smoke tests; 640 short requests completed without errors. Numerical canary
