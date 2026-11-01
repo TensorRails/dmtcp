@@ -171,11 +171,37 @@ dlopen_try_paths(const char *filename, int flags, const char *paths)
   return NULL;
 }
 
+// A filename with a slash is a path, which dlopen(3) opens without a search. glibc
+// expands $ORIGIN in it to the directory of the object that called dlopen, which
+// here would be this library: expand it for the wrapper's caller instead. A
+// library that loads its own parts as "$ORIGIN/libpart.so" (NVIDIA's cuInterpose
+// does) otherwise finds nothing under DMTCP.
+static void *
+dlopen_path(const char *filename, int flags, void *caller)
+{
+  if (strstr(filename, "$ORIGIN") == NULL &&
+      strstr(filename, "${ORIGIN}") == NULL) {
+    return _real_dlopen(filename, flags);
+  }
+
+  Dl_info info;
+  ASSERT_NE(0, dladdr(caller, &info));
+  char dirname[4096];
+  jalib::Filesystem::DirName(dirname, info.dli_fname);
+  char path[4096];
+  copyDynamicPath(path, sizeof(path), filename, dirname, "dlopen filename");
+  return _real_dlopen(path, flags);
+}
+
 static void *
 dmtcp_dlopen_with_search_policy(const char *filename, int flags, void *caller)
 {
   if (filename == NULL || strlen(filename) == 0) {
     return _real_dlopen(filename, flags);
+  }
+
+  if (strchr(filename, '/') != NULL) {
+    return dlopen_path(filename, flags, caller);
   }
 
   char rpath[4096];

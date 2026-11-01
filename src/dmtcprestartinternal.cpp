@@ -24,6 +24,7 @@
 #include <limits.h>
 #include <linux/capability.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -648,6 +649,17 @@ openCkptFileToRead(const string &filename)
     const_cast<char *>("-"),
     NULL
   };
+  const char *zstd_path = "zstd";
+  static const char *zstd_args[] = {
+    const_cast<char *>("zstd"),
+    const_cast<char *>("-d"),
+    const_cast<char *>("-q"),
+    const_cast<char *>("-c"),
+    const_cast<char *>("-"),
+    NULL
+  };
+  static const unsigned char zstd_magic[] = { 0x28, 0xb5, 0x2f, 0xfd };
+  unsigned char magic[sizeof zstd_magic] = {};
 
   pid_t cpid;
 
@@ -670,17 +682,19 @@ openCkptFileToRead(const string &filename)
   ASSERT_ERRNO(lseek(fd, 0, SEEK_SET) != -1,
                "failed to rewind checkpoint file before magic read: path={}",
                filename);
-  ASSERT_EQ(static_cast<ssize_t>(1),
-                        Util::readAll(fd, &fc, 1),
-                        "failed to read checkpoint magic byte: path={}",
+  ASSERT_EQ(static_cast<ssize_t>(sizeof magic),
+                        Util::readAll(fd, magic, sizeof magic),
+                        "failed to read checkpoint magic bytes: path={}",
                         filename.c_str());
   ASSERT_ERRNO(lseek(fd, 0, SEEK_SET) != -1,
                "failed to rewind checkpoint file after magic read: path={}",
                filename);
+  fc = static_cast<char>(magic[0]);
+  bool zstd = memcmp(magic, zstd_magic, sizeof magic) == 0;
 
-  if (fc == GZIP_FIRST) {
-    decomp_path = gzip_path;
-    decomp_args = gzip_args;
+  if (fc == GZIP_FIRST || zstd) {
+    decomp_path = zstd ? zstd_path : gzip_path;
+    decomp_args = zstd ? zstd_args : gzip_args;
 
     ASSERT_ERRNO(pipe(fds) != -1,
                  "creating gunzip pipe for checkpoint file: {}",

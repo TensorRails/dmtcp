@@ -527,6 +527,13 @@ FileConnection::postRestart()
 
   TRACE("Restoring file connection: con_id={} path={}",
         id().toString(), _path);
+  // The copy was saved next to the image, which may have moved since the
+  // checkpoint: look for it next to the image this process restarts from.
+  string moved = string(dmtcp_get_ckpt_files_subdir()) + "/" +
+                 jalib::Filesystem::BaseName(_savedFilePath);
+  if (jalib::Filesystem::FileExists(moved)) {
+    _savedFilePath = moved;
+  }
   ASSERT(jalib::Filesystem::FileExists(_savedFilePath),
          "Unable to find checkpointed copy of file: saved={} path={}",
          _savedFilePath, _path);

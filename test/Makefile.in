@@ -318,6 +318,14 @@ libdlopen-lib2.so: dlopen1.c
 dlopen1: dlopen1.c libdlopen-lib1.so libdlopen-lib2.so
 	${CC} $(CFLAGS) -o $@ $< -ldl
 
+# dlopen-origin: libdlopen-origin-a.so loads libdlopen-origin-b.so through $ORIGIN
+libdlopen-origin-a.so: dlopen-origin.c
+	${CC} ${CFLAGS} -shared -fPIC -DLIB_A -o $@ $< -ldl
+libdlopen-origin-b.so: dlopen-origin.c
+	${CC} ${CFLAGS} -shared -fPIC -DLIB_B -o $@ $<
+dlopen-origin: dlopen-origin.c libdlopen-origin-a.so libdlopen-origin-b.so
+	${CC} $(CFLAGS) -o $@ $< -ldl
+
 # dlopen2 will dlopen/dlclose libdlopen-lib[34].so
 libdlopen-lib3.so: dlopen2.cpp
 	${CXX} ${CXXFLAGS} -shared -fPIC -DLIB3 -o $@ $<

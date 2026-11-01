@@ -1,0 +1,128 @@
+name: warmctl release
+
+on:
+  pull_request:
+    branches: [main, warmctl]
+  push:
+    tags: ['v*-warmctl.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: warmctl-release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+      # Restored process trees are adopted by PID 1; reap them in this test container.
+      options: --init
+    timeout-minutes: 30
+    steps:
+      - name: Install native build dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends build-essential python3 git ca-certificates gzip zstd
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build
+        run: |
+          ./configure --prefix=/opt/warmctl/dmtcp --docdir=/opt/warmctl/dmtcp/share/doc/dmtcp
+          make -j2
+          make tests -j2
+      - name: Check memory readers and checkpoint bytes
+        run: python3 test/restore-memory-check.py --root . --output "$RUNNER_TEMP/memory-check"
+      - name: Existing process, thread and memory regressions
+        run: DMTCP_RESTART_HUGEPAGES=1 DMTCP_RESTART_READERS=16 python3 test/autotest.py --retry-once --jobs 2 file1 file3 mmap1 mmap-noreserve zeropages zeropages-pread pthread1 forkexec sysv-shm1 modify-env
+      - name: Package installed runtime and source
+        env:
+          TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'snapshot' }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          make install DESTDIR="$RUNNER_TEMP/stage"
+          make -C plugin/fdkeep install DESTDIR="$RUNNER_TEMP/stage"
+          install -m 0644 COPYING.LESSER "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/share/doc/dmtcp/"
+          mkdir -p dist
+          printf 'release=%s\ncommit=%s\nupstream_version=%s\nos=debian-12\narch=%s\nprefix=/opt/warmctl/dmtcp\n' \
+            "$TAG" "$GITHUB_SHA" "$(cat VERSION)" "$ARCH" > "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/BUILDINFO"
+          ldd --version | head -1 >> "$RUNNER_TEMP/stage/opt/warmctl/dmtcp/BUILDINFO"
+          tar -czf "dist/dmtcp-$TAG-linux-$ARCH-debian12.tar.gz" -C "$RUNNER_TEMP/stage/opt/warmctl" dmtcp
+          if [ "$ARCH" = amd64 ]; then
+            git -c safe.directory="$GITHUB_WORKSPACE" archive --format=tar.gz --prefix="dmtcp-$TAG/" HEAD > "dist/dmtcp-$TAG-source.tar.gz"
+          fi
+          (cd dist && sha256sum *.tar.gz > "dmtcp-$TAG-linux-$ARCH-checksums.txt")
+      - name: Verify packaged runtime
+        run: |
+          mkdir -p "$RUNNER_TEMP/relocated"
+          tar -xzf dist/*-linux-${{ matrix.arch }}-debian12.tar.gz -C "$RUNNER_TEMP/relocated"
+          "$RUNNER_TEMP/relocated/dmtcp/bin/dmtcp_launch" --version
+          python3 test/restore-memory-check.py --root "$RUNNER_TEMP/relocated/dmtcp" \
+            --plugin "$RUNNER_TEMP/relocated/dmtcp/lib/libdmtcp_fdkeep.so" --output "$RUNNER_TEMP/package-check"
+      - name: Archive test logs
+        if: always()
+        run: |
+          mkdir -p dist
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import tarfile
+          root = Path(os.environ['RUNNER_TEMP'])
+          with tarfile.open('dist/test-logs-${{ matrix.arch }}.tgz', 'w:gz') as archive:
+              for name in ('memory-check', 'package-check'):
+                  for log in (root / name).rglob('*.log'):
+                      archive.add(log, arcname=str(log.relative_to(root)))
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: dmtcp-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: linux
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dmtcp-linux-*
+          merge-multiple: true
+          path: artifacts
+      - name: Combined checksums
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd artifacts
+          rm *-linux-*-checksums.txt
+          sha256sum *.tar.gz > "dmtcp-$TAG-checksums.txt"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: artifacts/*.tar.gz
+      - name: Publish fork prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mapfile -t assets < <(find artifacts -type f \( -name '*.tar.gz' -o -name '*checksums.txt' \))
+          gh release create "$TAG" "${assets[@]}" --verify-tag --prerelease --title "DMTCP $TAG" --notes-file doc/warmctl-release-notes.md

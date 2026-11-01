@@ -583,6 +583,19 @@ restoreArgvEnvBoundsBestEffort(MemRegion argBounds, MemRegion envBounds)
   }
 }
 
+// The checkpoint directory becomes the one this process restarts from, which
+// may not be where it was checkpointed (images copied to another host or
+// directory).  It runs before any plugin's restart hook, so that the plugins
+// find what was saved next to the image (dmtcp_get_ckpt_files_subdir()).
+void
+ProcessInfo::restartCkptDir()
+{
+  string ckptDir = jalib::Filesystem::GetDeviceName(PROTECTED_CKPT_DIR_FD);
+  ASSERT(ckptDir.length() > 0, "restart checkpoint directory is empty");
+  _real_close(PROTECTED_CKPT_DIR_FD);
+  updateCkptDirFileSubdir(ckptDir);
+}
+
 void
 ProcessInfo::restart()
 {
@@ -591,12 +604,6 @@ ProcessInfo::restart()
   restoreHeap();
 
   restoreArgvEnvBoundsBestEffort(argBounds, envBounds);
-
-  // Update the ckptDir
-  string ckptDir = jalib::Filesystem::GetDeviceName(PROTECTED_CKPT_DIR_FD);
-  ASSERT(ckptDir.length() > 0, "restart checkpoint directory is empty");
-  _real_close(PROTECTED_CKPT_DIR_FD);
-  updateCkptDirFileSubdir(ckptDir);
 
   if (_launchCWD != _ckptCWD) {
     string rpath = "";

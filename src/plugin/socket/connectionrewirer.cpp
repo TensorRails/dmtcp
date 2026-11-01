@@ -130,16 +130,27 @@ ConnectionRewirer::doReconnect()
     Connection *con = i->second;
     struct RemoteAddr &remoteAddr = _remoteInfo[id];
     int fd = con->getFds()[0];
+
+    // A socket created with SOCK_NONBLOCK would return EINPROGRESS: connect
+    // and send the identifier blocking, then put its flags back.
+    int flags = _real_fcntl(fd, F_GETFL, NULL);
+    ASSERT_NE(-1, flags, "fcntl(F_GETFL) failed: fd={}", fd);
+    if (flags & O_NONBLOCK) {
+      markSocketBlocking(fd);
+    }
     errno = 0;
-    ASSERT_NE(-1,
-              _real_connect(fd,
-                            (sockaddr *)&remoteAddr.addr,
-                            remoteAddr.len),
-              "failed to restore connection: fd={} host={} pid={} time={} "
-              "con_id={}",
-              fd, id.hostid(), id.pid(), id.time(), id.conId());
+    ASSERT_ERRNO(_real_connect(fd,
+                               (sockaddr *)&remoteAddr.addr,
+                               remoteAddr.len) != -1,
+                 "failed to restore connection: fd={} family={} host={} "
+                 "pid={} time={} con_id={}",
+                 fd, remoteAddr.addr.ss_family, id.hostid(), id.pid(),
+                 id.time(), id.conId());
 
     Util::writeAll(fd, &id, sizeof id);
+    if (flags & O_NONBLOCK) {
+      markSocketNonBlocking(fd);
+    }
 
     checkForPendingIncoming(PROTECTED_RESTORE_IP4_SOCK_FD,
                             &_pendingIP4Incoming);
@@ -309,6 +320,16 @@ ConnectionRewirer::openRestoreSocket(bool hasIPv4Sock,
   }
 }
 
+int
+ConnectionRewirer::restoreDomain(int domain)
+{
+#ifdef ENABLE_IP6_SUPPORT
+  return domain;
+#else // ifdef ENABLE_IP6_SUPPORT
+  return domain == AF_INET6 ? AF_INET : domain;
+#endif // ifdef ENABLE_IP6_SUPPORT
+}
+
 void
 ConnectionRewirer::registerIncoming(const ConnectionIdentifier &local,
                                     Connection *con,
@@ -319,14 +340,11 @@ ConnectionRewirer::registerIncoming(const ConnectionIdentifier &local,
   SocketConnection *sc = dynamic_cast<SocketConnection *>(con);
   ASSERT_NOT_NULL(sc);
 
+  domain = restoreDomain(domain);
   if (domain == AF_INET) {
     _pendingIP4Incoming[local] = con;
   } else if (domain == AF_INET6) {
-#ifdef ENABLE_IP6_SUPPORT
     _pendingIP6Incoming[local] = con;
-#else // ifdef ENABLE_IP6_SUPPORT
-    _pendingIP4Incoming[local] = con;
-#endif // ifdef ENABLE_IP6_SUPPORT
   } else if (domain == AF_UNIX) {
     // Route AF_UNIX by base type: stream vs seqpacket
     if (sc->baseType() == SOCK_SEQPACKET) {
@@ -371,6 +389,10 @@ ConnectionRewirer::registerNSData(void *addr,
   iterator i;
 
   ASSERT_NOT_NULL(theRewirer);
+  // A peer would connect to a zeroed address and fail far from the cause.
+  ASSERT(conList->empty() || ((sockaddr *)addr)->sa_family != AF_UNSPEC,
+         "no restore listener for {} incoming connections",
+         conList->size());
   for (i = conList->begin(); i != conList->end(); ++i) {
     const ConnectionIdentifier &id = i->first;
     string addrStr = dmtcp::base64::encode((const char*) addr, addrLen);

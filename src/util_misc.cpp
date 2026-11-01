@@ -65,6 +65,7 @@ struct pm_scan_arg {
   uint64_t return_mask;
 };
 
+# define PAGE_IS_FILE    (1 << 2)
 # define PAGE_IS_PRESENT (1 << 3)
 # define PAGE_IS_SWAPPED (1 << 4)
 # define PAGEMAP_SCAN    _IOWR('f', 16, struct pm_scan_arg)
@@ -833,6 +834,74 @@ Util::scanOccupiedRangeBatch(uintptr_t start, uintptr_t end,
   // we got if pread() broke out early).
   *size_scanned = (current_addr >= endAddr ? endAddr : current_addr) - start;
   return !leading_occupied;
+}
+
+// See the declaration in util.h.  Allocation-free, so it is safe to call while
+// writing a checkpoint image.
+bool
+Util::areaHasPrivatePages(uintptr_t start, uintptr_t end)
+{
+  const size_t page_size = pageSize();
+  const uintptr_t pgMask = ~(uintptr_t)(page_size - 1);
+  const uintptr_t startAddr = start & pgMask;
+  const uintptr_t endAddr = (end + page_size - 1) & pgMask;
+
+  if (startAddr >= endAddr) {
+    return false;
+  }
+  int fd = _real_open("/proc/self/pagemap", O_RDONLY);
+  if (fd < 0) {
+    return true; // can't inspect: the caller writes the data
+  }
+
+  if (!readBooleanEnv(ENV_VAR_DISABLE_PAGEMAP_SCAN, false)) {
+    // A page that is present or swapped and not a file page is a private copy.
+    struct page_region region;
+    struct pm_scan_arg arg;
+    memset(&arg, 0, sizeof(arg));
+    arg.size = sizeof(arg);
+    arg.start = startAddr;
+    arg.end = endAddr;
+    arg.vec = (uintptr_t)&region;
+    arg.vec_len = 1;
+    arg.category_inverted = PAGE_IS_FILE;
+    arg.category_mask = PAGE_IS_FILE;
+    arg.category_anyof_mask = PAGE_IS_PRESENT | PAGE_IS_SWAPPED;
+    arg.return_mask = PAGE_IS_PRESENT | PAGE_IS_SWAPPED;
+
+    long ret = ioctl(fd, PAGEMAP_SCAN, &arg);
+    if (ret >= 0) {
+      _real_close(fd);
+      // A walk that stopped short of the end decided nothing about the rest.
+      return ret > 0 || (arg.walk_end != 0 && arg.walk_end < endAddr);
+    }
+  }
+
+  // Fallback: pagemap bit 63 is present, 62 swapped, 61 a file page.
+  uint64_t entries[PAGEMAP_BATCH_SIZE];
+  uintptr_t current_addr = startAddr;
+  while (current_addr < endAddr) {
+    size_t pages = MIN((endAddr - current_addr) / page_size,
+                       (size_t)PAGEMAP_BATCH_SIZE);
+    off_t offset = (off_t)(current_addr / page_size) * sizeof(uint64_t);
+    ssize_t bytes_read = pread(fd, entries, pages * sizeof(uint64_t), offset);
+    if (bytes_read <= 0 || bytes_read % sizeof(uint64_t) != 0) {
+      _real_close(fd);
+      return true;
+    }
+    for (size_t i = 0; i < bytes_read / sizeof(uint64_t); i++) {
+      const bool present = (entries[i] >> 63) & 1;
+      const bool swapped = (entries[i] >> 62) & 1;
+      const bool file = (entries[i] >> 61) & 1;
+      if (swapped || (present && !file)) {
+        _real_close(fd);
+        return true;
+      }
+    }
+    current_addr += (bytes_read / sizeof(uint64_t)) * page_size;
+  }
+  _real_close(fd);
+  return false;
 }
 
 // See the declaration in util.h.  Allocation-free, so it is safe to call while

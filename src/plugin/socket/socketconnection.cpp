@@ -140,6 +140,37 @@ SocketConnection::addSetsockopt(int level,
   }
 }
 
+// Options that change what bind() accepts must be set before it: IPV6_V6ONLY
+// decides whether an IPv6 socket also takes IPv4, and SO_REUSEADDR and
+// SO_REUSEPORT whether the address may be bound while connections of the
+// checkpointed process linger in TIME_WAIT (the usual case right after the
+// original was killed).  The rest come back after bind, in the order of
+// restoreSocketOptions().
+void
+SocketConnection::restoreBindOptions(int fd)
+{
+  for (const auto &lvl : _sockOptions) {
+    for (const auto &opt : lvl.second) {
+      bool beforeBind =
+        (lvl.first == SOL_SOCKET &&
+         (opt.first == SO_REUSEADDR || opt.first == SO_REUSEPORT)) ||
+        (lvl.first == IPPROTO_IPV6 && opt.first == IPV6_V6ONLY &&
+         _sockDomain == AF_INET6);
+      if (!beforeBind) {
+        continue;
+      }
+      TRACE("Restoring socket option before bind: fd={} level={} option={}",
+            fd, lvl.first, opt.first);
+      int ret = _real_setsockopt(fd, lvl.first, opt.first,
+                                 opt.second.data(), opt.second.size());
+      ASSERT_ERRNO(ret == 0,
+                   "restoring socket option before bind failed: fd={} "
+                   "level={} option={}",
+                   fd, lvl.first, opt.first);
+    }
+  }
+}
+
 void
 SocketConnection::restoreSocketOptions(vector<int> &fds)
 {
@@ -801,46 +832,19 @@ TcpConnection::postRestart()
      *                               --Kapil
      */
 
-    if (_sockDomain == AF_INET6) {
-      TRACE("Restoring IPv6 socket options before bind: fd={}", _fds[0]);
-      typedef map<int64_t,
-                  map<int64_t, vector<char> > >::iterator levelIterator;
-      typedef map<int64_t, vector<char> >::iterator optionIterator;
-
-      for (levelIterator lvl = _sockOptions.begin();
-           lvl != _sockOptions.end(); ++lvl) {
-        if (lvl->first == IPPROTO_IPV6) {
-          for (optionIterator opt = lvl->second.begin();
-               opt != lvl->second.end(); ++opt) {
-            if (opt->first == IPV6_V6ONLY) {
-              if (really_verbose) {
-                TRACE("Restoring socket option: fd={} option={} size={}",
-                      _fds[0], opt->first, opt->second.size());
-              }
-              int ret = _real_setsockopt(_fds[0], lvl->first, opt->first,
-                                         opt->second.data(),
-                                         opt->second.size());
-              ASSERT_ERRNO(ret == 0,
-                           "Restoring IPV6_V6ONLY setsockopt failed: fd={} "
-                           "level={} option={} value={} size={}",
-                           _fds[0], lvl->first, opt->first,
-                           opt->second.data(), opt->second.size());
-            }
-          }
-        }
-      }
-    }
+    restoreBindOptions(_fds[0]);
 
     if (really_verbose) {
       TRACE("Binding recreated TCP socket: con_id={} fd={}",
             id().toString(), _fds[0]);
     }
     errno = 0;
-    WARN_NE(-1, _real_bind(_fds[0],
-                                           (sockaddr *)&_bindAddr,
-                                           _bindAddrlen),
-                                "Bind failed: fd={} con_id={} addrlen={}",
-                                _fds[0], id().conId(), _bindAddrlen);
+    WARN_ERRNO(_real_bind(_fds[0], (sockaddr *)&_bindAddr, _bindAddrlen) != -1,
+               "Bind failed: fd={} con_id={} family={} port={} addrlen={}",
+               _fds[0], id().conId(), _bindAddr.ss_family,
+               _sockDomain == AF_UNIX
+                 ? 0 : ntohs(((sockaddr_in *)&_bindAddr)->sin_port),
+               _bindAddrlen);
     if (_type == TCP_BIND) {
       break;
     }

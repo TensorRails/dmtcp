@@ -93,14 +93,15 @@ connect(int sockfd, const struct sockaddr *serv_addr, socklen_t addrlen)
   if ((ret != -1 || errno == EINPROGRESS) &&
       dmtcp_is_running_state() &&
       !_doNotProcessSockets) {
-    SocketConnection *con =
-      dynamic_cast<SocketConnection *>(SocketConnList::instance().getConnection(
-                                         sockfd));
-    if (con == NULL) {
-      TRACE("Called connect() on untracked socket type: fd={}", sockfd);
-    } else {
-      con->onConnect(serv_addr, addrlen, (ret == -1 && errno == EINPROGRESS));
-    }
+    bool inProgress = ret == -1 && errno == EINPROGRESS;
+    SocketConnList::instance().withConnection(sockfd, [&](Connection *c) {
+      SocketConnection *con = dynamic_cast<SocketConnection *>(c);
+      if (con == NULL) {
+        TRACE("Called connect() on untracked socket type: fd={}", sockfd);
+      } else {
+        con->onConnect(serv_addr, addrlen, inProgress);
+      }
+    });
   }
 
   errno = savedErrno;
@@ -117,14 +118,14 @@ bind(int sockfd, const struct sockaddr *my_addr, socklen_t addrlen)
   WrapperLock wrapperLock;
   int ret = _real_bind(sockfd, my_addr, addrlen);
   if (ret != -1 && dmtcp_is_running_state() && !_doNotProcessSockets) {
-    SocketConnection *con =
-      dynamic_cast<SocketConnection *>(SocketConnList::instance().getConnection(
-                                         sockfd));
-    if (con == NULL) {
-      TRACE("Called bind() on untracked socket type: fd={}", sockfd);
-    } else {
-      con->onBind((struct sockaddr *)my_addr, addrlen);
-    }
+    SocketConnList::instance().withConnection(sockfd, [&](Connection *c) {
+      SocketConnection *con = dynamic_cast<SocketConnection *>(c);
+      if (con == NULL) {
+        TRACE("Called bind() on untracked socket type: fd={}", sockfd);
+      } else {
+        con->onBind((struct sockaddr *)my_addr, addrlen);
+      }
+    });
   }
   return ret;
 }
@@ -139,14 +140,14 @@ listen(int sockfd, int backlog)
   WrapperLock wrapperLock;
   int ret = _real_listen(sockfd, backlog);
   if (ret != -1 && dmtcp_is_running_state() && !_doNotProcessSockets) {
-    SocketConnection *con =
-      dynamic_cast<SocketConnection *>(SocketConnList::instance().getConnection(
-                                         sockfd));
-    if (con == NULL) {
-      TRACE("Called listen() on untracked socket type: fd={}", sockfd);
-    } else {
-      con->onListen(backlog);
-    }
+    SocketConnList::instance().withConnection(sockfd, [&](Connection *c) {
+      SocketConnection *con = dynamic_cast<SocketConnection *>(c);
+      if (con == NULL) {
+        TRACE("Called listen() on untracked socket type: fd={}", sockfd);
+      } else {
+        con->onListen(backlog);
+      }
+    });
   }
   return ret;
 }
@@ -261,20 +262,24 @@ setsockopt(int sockfd,
     return _real_setsockopt(sockfd, level, optname, optval, optlen);
   }
 
+  // Threads that set options while another closes and reopens descriptors
+  // (cuInterpose's, after a restart) must not reach a connection the table
+  // drops meanwhile: the lock keeps the checkpoint off, withConnection the
+  // table's own changes.
+  WrapperLock wrapperLock;
   int ret = _real_setsockopt(sockfd, level, optname, optval, optlen);
 
   if (ret != -1 && dmtcp_is_running_state() && !_doNotProcessSockets) {
     TRACE("Recording socket option: fd={} level={} option={} size={}",
           sockfd, level, optname, optlen);
-    SocketConnection *con =
-      dynamic_cast<SocketConnection *>(SocketConnList::instance().getConnection(
-                                         sockfd));
-    if (con == NULL) {
-      TRACE("Called setsockopt() on untracked socket type: fd={}", sockfd);
-      return ret;
-    } else {
-      con->addSetsockopt(level, optname, optval, optlen);
-    }
+    SocketConnList::instance().withConnection(sockfd, [&](Connection *c) {
+      SocketConnection *con = dynamic_cast<SocketConnection *>(c);
+      if (con == NULL) {
+        TRACE("Called setsockopt() on untracked socket type: fd={}", sockfd);
+      } else {
+        con->addSetsockopt(level, optname, optval, optlen);
+      }
+    });
   }
   return ret;
 }

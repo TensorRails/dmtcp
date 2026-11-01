@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <sys/resource.h>
 #include <sys/time.h>
+#include <time.h>
 #include "../jalib/jconvert.h"
 #include "../jalib/jfilesystem.h"
 #include "../jalib/jsocket.h"
@@ -550,13 +551,35 @@ DmtcpWorker::postCheckpoint()
 void
 DmtcpWorker::postRestart()
 {
+  char profileValue[8] = {};
+  bool profile = dmtcp_get_restart_env("DMTCP_RESTART_PROFILE", profileValue,
+                                      sizeof(profileValue)) == RESTART_ENV_SUCCESS &&
+                 strcmp(profileValue, "1") == 0;
+  auto profileTime = []() -> uint64_t {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+  };
+  uint64_t phaseStart = profile ? profileTime() : 0;
+  auto profilePhase = [&](const char *phase) {
+    if (profile) {
+      uint64_t now = profileTime();
+      dprintf(STDERR_FILENO, "DMTCP_PROFILE pid=%d phase=%s total_us=%llu\n",
+              getpid(), phase, (unsigned long long) (now - phaseStart));
+      phaseStart = profileTime();
+    }
+  };
   TRACE("begin postRestart()");
   WorkerState::setCurrentState(WorkerState::RESTARTING);
 
   TRACE("Waiting for Restart barrier");
   CoordinatorAPI::waitForBarrier("DMT:Restart");
+  profilePhase("restart_barrier");
 
+  ProcessInfo::instance().restartCkptDir();
+  profilePhase("restart_directory");
   PluginManager::eventHook(DMTCP_EVENT_RESTART);
+  profilePhase("restart_plugins");
 
   TRACE("got resume message after restart");
 
@@ -575,4 +598,5 @@ DmtcpWorker::postRestart()
   TRACE("Informing coordinator of RUNNING status: process={}",
         UniquePid::ThisProcess());
   CoordinatorAPI::sendMsgToCoordinator(DMT_WORKER_RESUMING);
+  profilePhase("restart_maps_and_resume");
 }

@@ -46,6 +46,7 @@ class ProcessInfo : public DmtcpCkptHeader
     void resetOnFork();
     void preCkpt();
     void restart();
+    void restartCkptDir();
     void restoreProcessGroupInfo();
     void restoreHeap();
     void growStack();
@@ -87,7 +88,7 @@ class ProcessInfo : public DmtcpCkptHeader
 
     const string &upidStr() {
       if (_upidStr.empty()) {
-        _upidStr = UniquePid(upid).toString();
+        _upidStr = getUpid().toString();
       }
       return _upidStr;
     }

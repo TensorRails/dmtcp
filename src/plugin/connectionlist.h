@@ -67,6 +67,22 @@ class ConnectionList
     void erase(ConnectionIdentifier &key);
     Connection *getConnection(const ConnectionIdentifier &id);
     Connection *getConnection(int fd);
+
+    // Calls fn with fd's connection, or NULL, with the table locked, so that
+    // no other thread deletes the connection meanwhile: add() drops the
+    // entry of an fd that was closed past the close wrapper (raw syscalls,
+    // glibc's internal close) when the number comes back, and processClose()
+    // drops a closed one. Callers hold the WrapperLock, so that the
+    // checkpoint never suspends them with the table locked. fn must not call
+    // back into the table.
+    template<typename Fn>
+    void withConnection(int fd, Fn fn)
+    {
+      _lock_tbl();
+      fn(_fdToCon.contains(fd) ? _fdToCon[fd] : NULL);
+      _unlock_tbl();
+    }
+
     void processClose(int fd);
     void processDup(int oldfd, int newfd);
     void list();

@@ -237,10 +237,16 @@ dmtcp_get_uniquepid_str(void)
   return ProcessInfo::instance().upidStr().c_str();
 }
 
+// A forked child's upid is null until its first checkpoint (resetOnFork);
+// getUpid() then takes the child's own, which UniquePid reset at the fork.
+// Read directly, every connection a child created before its first
+// checkpoint was named 0-0-0(n), with n counted on from the parent's: two
+// children's connections got the same names, and the restart waited forever
+// for a connection the other child had taken.
 EXTERNC DmtcpUniqueProcessId
 dmtcp_get_uniquepid(void)
 {
-  return ProcessInfo::instance().upid;
+  return ProcessInfo::instance().getUpid().upid();
 }
 
 EXTERNC DmtcpUniqueProcessId
@@ -385,9 +391,12 @@ dmtcp_get_restart_env(const char *name,   // IN
       char *start_ptr = env_buf;
 
       // iterate over the flattened list of name-value pairs
-      while (start_ptr - env_buf < (int)sizeof(env_buf)) {
+      // env_buf is a pointer, not an array. sizeof(env_buf) only inspected
+      // the first environment entry on 64-bit hosts. Bound the scan by the
+      // bytes read, and require the complete variable name (not its prefix).
+      while (start_ptr - env_buf < count) {
         pos = NULL;
-        if (strncmp(start_ptr, name, namelen) == 0) {
+        if (strncmp(start_ptr, name, namelen) == 0 && start_ptr[namelen] == '=') {
           if ((pos = strchr(start_ptr, '='))) {
             strncpy(value, pos + 1, maxvaluelen);
             if (strlen(pos + 1) >= maxvaluelen) {
