@@ -2015,6 +2015,7 @@ class TestRegistry:
             TestSpec("dlopen-origin", 1, ["./test/dlopen-origin"]),
             TestSpec("fcntl64-dup", 2, ["./test/fcntl64-dup"]),
             TestSpec("sem-unlinked-shared", 2, ["./test/sem-unlinked-shared"]),
+            TestSpec("setsockopt-race", 1, ["./test/setsockopt-race"]),
             TestSpec("dmtcp5", 2, ["./test/dmtcp5"]),
             TestSpec("syscall-tester", 1,
                      ["--checkpoint-open-files ./test/syscall-tester"],
