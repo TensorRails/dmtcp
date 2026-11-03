@@ -32,6 +32,9 @@ int main(int argc, char **argv)
 {
   size_t mib = argc > 1 ? strtoull(argv[1], NULL, 10) : 256;
   int sparse = argc > 2 && strcmp(argv[2], "sparse") == 0;
+  /* zeroed: the odd stripes are written, then cleared, so they are resident
+   * pages of zeros rather than holes. */
+  int zeroed = argc > 2 && strcmp(argv[2], "zeroed") == 0;
   int cow = argc > 3 && strcmp(argv[3], "cow") == 0;
   const size_t stripeWords = 64 * 1024 * 1024 / 8;
   if (!mib || mib > 65536) return 2;
@@ -44,7 +47,11 @@ int main(int argc, char **argv)
   for (size_t i = 0; i < bytes / 8; ++i) {
     if (!sparse || (i / stripeWords) % 2 == 0) p[i] = word(i);
   }
-  printf("BENCH_CHECKPOINT mib=%zu sparse=%d\n", mib, sparse);
+  for (size_t i = stripeWords; zeroed && i < bytes / 8; i += 2 * stripeWords) {
+    size_t n = bytes / 8 - i < stripeWords ? bytes / 8 - i : stripeWords;
+    memset(p + i, 0, n * 8);
+  }
+  printf("BENCH_CHECKPOINT mib=%zu sparse=%d zeroed=%d\n", mib, sparse, zeroed);
   fflush(stdout);
   int result = dmtcp_checkpoint();
   if (result == DMTCP_NOT_PRESENT) return 3;
@@ -64,7 +71,7 @@ int main(int argc, char **argv)
   printf("BENCH_RESUMED monotonic=%.6f mib=%zu\n", start, mib);
   fflush(stdout);
   for (size_t i = 0; i < bytes / 8; ++i) {
-    uint64_t expected = sparse && (i / stripeWords) % 2 ? 0 : word(i);
+    uint64_t expected = (sparse || zeroed) && (i / stripeWords) % 2 ? 0 : word(i);
     if (p[i] != expected) {
       fprintf(stderr, "BENCH_CORRUPT word=%zu got=%" PRIx64 " expected=%" PRIx64 "\n",
               i, p[i], expected);
@@ -96,7 +103,7 @@ int main(int argc, char **argv)
     if (secondResult == DMTCP_AFTER_CHECKPOINT) return 0;
     if (secondResult != DMTCP_AFTER_RESTART) return 8;
     for (size_t i = 0; i < bytes / 8; ++i) {
-      uint64_t expected = sparse && (i / stripeWords) % 2 ? 0 : word(i);
+      uint64_t expected = (sparse || zeroed) && (i / stripeWords) % 2 ? 0 : word(i);
       if (i % (4096 / 8) == 0) expected ^= UINT64_C(0xfedcba9876543210);
       if (p[i] != expected) return 9;
     }

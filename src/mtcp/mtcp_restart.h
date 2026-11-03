@@ -155,6 +155,12 @@ typedef struct RestoreInfo {
   uint64_t profileParallelBytes;
   uint64_t profileChildMinorFaults;
   uint64_t profileChildMajorFaults;
+  // Reads put off to be done together by the readers (restart_defer_read()).
+  // The array lives in mtcp_readmemoryareas()'s frame.
+  struct RestartSegment *deferred;
+  size_t deferredCount;
+  uint64_t deferredBytes;
+  unsigned profileBatches;
 } RestoreInfo;
 
 // int mtcp_restart_process_args(RestoreInfo *rinfo, int argc, char *argv[], char **environ);

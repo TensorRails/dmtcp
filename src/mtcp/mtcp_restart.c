@@ -886,12 +886,34 @@ __asm__(".text\n"
         "ud2\n"
         "1: ret\n"
         ".size mtcp_read_clone,.-mtcp_read_clone\n");
+#endif
 
-typedef struct {
-  int fd;
+// A run of bytes of the image to be read into memory.
+typedef struct RestartSegment {
   char *address;
   size_t size;
   off_t offset;
+} RestartSegment;
+
+// Segments are put off until this many are pending, then read together.
+#define RESTART_DEFERRED_MAX 1024
+
+// Smaller areas are read at once, in order: putting their reads off would
+// turn the pass over the headers into a seek per area, which costs more on a
+// cold or network file than the readers save.
+#define RESTART_DEFER_MIN (1024UL * 1024)
+
+// Below this many bytes, starting readers costs more than it saves.
+#define RESTART_PARALLEL_MIN (64UL * 1024 * 1024)
+
+// One reader's share: size bytes of the segments, from byte skip of
+// segments[first] on.
+typedef struct {
+  int fd;
+  const RestartSegment *segments;
+  size_t first;
+  size_t skip;
+  size_t size;
   volatile int result;
   pid_t parent;
 } RestartReadJob;
@@ -901,19 +923,27 @@ restart_read_job(void *raw)
 {
   int mtcp_sys_errno;
   RestartReadJob *job = (RestartReadJob *) raw;
-  size_t done = 0;
-  while (done < job->size) {
-    size_t chunk = job->size - done;
+  size_t i = job->first, skip = job->skip, left = job->size;
+  while (left > 0) {
+    const RestartSegment *s = &job->segments[i];
+    size_t chunk = s->size - skip;
+    if (chunk > left) chunk = left;
     if (chunk > 64 * 1024 * 1024) chunk = 64 * 1024 * 1024;
-    long n = mtcp_inline_syscall(pread64, 4, job->fd, job->address + done,
-                                 chunk, job->offset + done);
+    long n = mtcp_inline_syscall(pread64, 4, job->fd, s->address + skip,
+                                 chunk, s->offset + skip);
     if (n < 0 && mtcp_sys_errno == EINTR) continue;
     if (n <= 0) return job->result = 1;
-    done += n;
+    skip += n;
+    left -= n;
+    if (skip == s->size) {
+      i++;
+      skip = 0;
+    }
   }
   return job->result = 0;
 }
 
+#if defined(__x86_64__)
 static int
 restart_read_child(void *raw)
 {
@@ -927,15 +957,16 @@ restart_read_child(void *raw)
 }
 #endif
 
+// Reads total bytes of the segments with the readers, each taking an equal
+// share of the bytes whatever the segments' sizes.  Returns 0, having changed
+// nothing but memory, if they could not; the fd's offset is never moved.
 static int
-restart_parallel_read(RestoreInfo *rinfo, int fd, void *address, size_t size)
+restart_read_segments(RestoreInfo *rinfo, int fd, const RestartSegment *segments,
+                      size_t count, uint64_t total)
 {
 #if defined(__x86_64__)
   int mtcp_sys_errno;
-  if (rinfo->restartReaders <= 1 || !rinfo->restartImageRegular ||
-      size < 1024UL * 1024 * 1024) return 0;
-  off_t offset = mtcp_sys_lseek(fd, 0, SEEK_CUR);
-  if (offset < 0) return 0;
+  if (rinfo->restartReaders <= 1 || total < RESTART_PARALLEL_MIN) return 0;
   const size_t stackSize = 64 * 1024;
   int readers = rinfo->restartReaders;
   char *stacks = mtcp_sys_mmap(NULL, stackSize * (readers - 1),
@@ -945,18 +976,29 @@ restart_parallel_read(RestoreInfo *rinfo, int fd, void *address, size_t size)
   RestartReadJob jobs[16];
   long pids[16];
   const size_t huge = 2 * 1024 * 1024;
-  size_t stride = ((size + readers - 1) / readers + huge - 1) & ~(huge - 1);
+  size_t stride = ((total + readers - 1) / readers + huge - 1) & ~(huge - 1);
   pid_t parent = mtcp_sys_getpid();
+  size_t seg = 0, skip = 0; // where the next share starts
   for (int i = 0; i < readers; i++) {
-    size_t start = stride * i;
-    size_t length = size > start ? size - start : 0;
+    uint64_t start = (uint64_t) stride * i;
+    size_t length = total > start ? total - start : 0;
     if (length > stride) length = stride;
-    jobs[i] = (RestartReadJob){fd, (char *) address + start,
-                              length, offset + start, -1, parent};
-    pids[i] = i + 1 < readers ?
+    jobs[i] = (RestartReadJob){fd, segments, seg, skip, length, -1, parent};
+    for (size_t left = length; left > 0;) {
+      size_t rest = segments[seg].size - skip;
+      if (rest > left) {
+        skip += left;
+        break;
+      }
+      left -= rest;
+      seg++;
+      skip = 0;
+    }
+    pids[i] = i + 1 < readers && length > 0 ?
       mtcp_read_clone(restart_read_child, stacks + stackSize * (i + 1), &jobs[i]) : -1;
   }
-  // Failed clone calls fall back to doing that helper's range in the parent.
+  MTCP_ASSERT(seg == count && skip == 0);
+  // Failed clone calls fall back to doing that helper's share in the parent.
   for (int i = 0; i < readers; i++) {
     if (pids[i] < 0) restart_read_job(&jobs[i]);
   }
@@ -978,12 +1020,89 @@ restart_parallel_read(RestoreInfo *rinfo, int fd, void *address, size_t size)
     if (jobs[i].result != 0) ok = 0;
   }
   MTCP_ASSERT(mtcp_sys_munmap(stacks, stackSize * (readers - 1)) == 0);
-  if (!ok) return 0; // pread did not move fd: the ordinary reader can retry.
-  MTCP_ASSERT(mtcp_sys_lseek(fd, offset + size, SEEK_SET) == offset + size);
-  rinfo->profileParallelBytes += size;
-  return 1;
+  if (ok) rinfo->profileParallelBytes += total;
+  return ok;
 #else
   return 0;
+#endif
+}
+
+// Reads one large area at the fd's offset with the readers and moves the
+// offset past it.  Returns 0, leaving the offset, if it did not.
+static int
+restart_parallel_read(RestoreInfo *rinfo, int fd, void *address, size_t size)
+{
+  int mtcp_sys_errno;
+  if (!rinfo->restartImageRegular || size < 1024UL * 1024 * 1024) return 0;
+  off_t offset = mtcp_sys_lseek(fd, 0, SEEK_CUR);
+  if (offset < 0) return 0;
+  RestartSegment segment = {(char *) address, size, offset};
+  if (!restart_read_segments(rinfo, fd, &segment, 1, size)) return 0;
+  MTCP_ASSERT(mtcp_sys_lseek(fd, offset + size, SEEK_SET) == offset + size);
+  return 1;
+}
+
+// Reads every deferred segment: with the readers when there are enough bytes,
+// else (or if they fail) in this thread.  An image that ends early is fatal,
+// as it is to mtcp_readfile().
+static void
+restart_flush_reads(RestoreInfo *rinfo, int fd)
+{
+  int mtcp_sys_errno;
+  if (rinfo->deferredCount == 0) return;
+  uint64_t start = rinfo->profileRestart ? restart_time_us() : 0;
+  uint64_t total = rinfo->deferredBytes;
+  int parallel = restart_read_segments(rinfo, fd, rinfo->deferred,
+                                       rinfo->deferredCount, total);
+  if (!parallel) {
+    RestartReadJob job = {fd, rinfo->deferred, 0, 0, total, -1, 0};
+    if (restart_read_job(&job) != 0) {
+      MTCP_PRINTF("error %d reading %u deferred segments (%p bytes) of the "
+                  "checkpoint image\n", mtcp_sys_errno,
+                  (unsigned) rinfo->deferredCount, (void *) total);
+      mtcp_abort();
+    }
+  }
+  rinfo->profileBatches++;
+  if (rinfo->profileRestart) {
+    uint64_t us = restart_time_us() - start;
+    rinfo->profileReadUs += us;
+    rinfo->profileReadBytes += total;
+    MTCP_PRINTF("DMTCP_PROFILE pid=%d virtual_pid=%d phase=batch segments=%u "
+                "read_kib=%u read_us=%u mode=%s\n", mtcp_sys_getpid(),
+                rinfo->ckptHdr.pid, (unsigned) rinfo->deferredCount,
+                (unsigned) (total / 1024), (unsigned) us,
+                parallel ? "pread" : "read");
+  }
+  rinfo->deferredCount = 0;
+  rinfo->deferredBytes = 0;
+}
+
+// Puts off reading size bytes at the fd's offset into address, moving the
+// offset past them, so the readers can share them with other large runs:
+// zero runs cut a large area into runs too small to share on their own.
+// Only into memory that stays writable, since a read-only area is protected
+// as soon as it is read.  Returns 0 if the bytes must be read now.
+static int
+restart_defer_read(RestoreInfo *rinfo, int fd, void *address, size_t size,
+                   int prot)
+{
+#if defined(__x86_64__)
+  int mtcp_sys_errno;
+  if (rinfo->restartReaders <= 1 || !rinfo->restartImageRegular ||
+      !(prot & PROT_WRITE) || size < RESTART_DEFER_MIN) return 0;
+  off_t offset = mtcp_sys_lseek(fd, 0, SEEK_CUR);
+  if (offset < 0) return 0;
+  if (rinfo->deferredCount == RESTART_DEFERRED_MAX) {
+    restart_flush_reads(rinfo, fd);
+  }
+  rinfo->deferred[rinfo->deferredCount++] =
+    (RestartSegment){(char *) address, size, offset};
+  rinfo->deferredBytes += size;
+  MTCP_ASSERT(mtcp_sys_lseek(fd, size, SEEK_CUR) == offset + (off_t) size);
+  return 1;
+#else
+  return 0; // there are no readers to share them
 #endif
 }
 
@@ -999,6 +1118,9 @@ mtcp_readmemoryareas(RestoreInfo *rinfo, int fd, VA endOfStack)
   rinfo->profileFilemapBytes = rinfo->profileFilemapUs = 0;
   rinfo->profileParallelBytes = rinfo->profileChildMinorFaults = 0;
   rinfo->profileChildMajorFaults = 0;
+  RestartSegment deferred[RESTART_DEFERRED_MAX];
+  rinfo->deferred = deferred;
+  rinfo->deferredCount = rinfo->deferredBytes = rinfo->profileBatches = 0;
   rinfo->mmapParentStart = rinfo->mmapParentEnd = 0;
   struct stat imageStat;
   rinfo->restartImageRegular = (rinfo->restartMmap || rinfo->restartReaders > 1) &&
@@ -1012,6 +1134,8 @@ mtcp_readmemoryareas(RestoreInfo *rinfo, int fd, VA endOfStack)
       break; /* error */
     }
   }
+  restart_flush_reads(rinfo, fd);
+  rinfo->deferred = NULL;
   if (rinfo->profileRestart) {
     uint64_t elapsed = restart_time_us() - start;
     usage_ok = usage_ok &&
@@ -1020,7 +1144,7 @@ mtcp_readmemoryareas(RestoreInfo *rinfo, int fd, VA endOfStack)
                 "map_us=%u read_kib=%u areas=%u minflt=%u majflt=%u "
                 "usage_ok=%u huge_advice=%u huge_failed=%u "
                 "filemap_kib=%u filemap_us=%u readers=%u parallel_kib=%u "
-                "child_minflt=%u child_majflt=%u\n",
+                "child_minflt=%u child_majflt=%u batches=%u\n",
                 mtcp_sys_getpid(), rinfo->ckptHdr.pid, (unsigned) elapsed,
                 (unsigned) rinfo->profileReadUs, (unsigned) rinfo->profileMapUs,
                 (unsigned) (rinfo->profileReadBytes / 1024), rinfo->profileAreas,
@@ -1031,7 +1155,8 @@ mtcp_readmemoryareas(RestoreInfo *rinfo, int fd, VA endOfStack)
                 (unsigned) rinfo->profileFilemapUs, rinfo->restartReaders,
                 (unsigned) (rinfo->profileParallelBytes / 1024),
                 (unsigned) rinfo->profileChildMinorFaults,
-                (unsigned) rinfo->profileChildMajorFaults);
+                (unsigned) rinfo->profileChildMajorFaults,
+                rinfo->profileBatches);
   }
 #if defined(__arm__) || defined(__aarch64__)
 
@@ -1348,12 +1473,15 @@ read_one_memory_area(RestoreInfo *rinfo, int fd, VA endOfStack)
           }
         }
       }
-      int parallelRead = !mappedImage &&
+      int deferredRead = !mappedImage &&
+        restart_defer_read(rinfo, fd, area.addr, readSize, area.prot);
+      int parallelRead = !mappedImage && !deferredRead &&
         restart_parallel_read(rinfo, fd, area.addr, readSize);
-      if (!mappedImage && !parallelRead) {
+      if (!mappedImage && !deferredRead && !parallelRead) {
         mtcp_readfile(fd, area.addr, readSize);
       }
-      if (rinfo->profileRestart) {
+      // A deferred read is timed and counted with its batch.
+      if (rinfo->profileRestart && !deferredRead) {
         uint64_t us = restart_time_us() - readStart;
         if (mappedImage) {
           rinfo->profileFilemapUs += us;
