@@ -32,19 +32,32 @@ int main(int argc, char **argv)
 {
   size_t mib = argc > 1 ? strtoull(argv[1], NULL, 10) : 256;
   int sparse = argc > 2 && strcmp(argv[2], "sparse") == 0;
+  /* zeroed: the odd stripes are written, then cleared, so they are resident
+   * pages of zeros rather than holes. */
+  int zeroed = argc > 2 && strcmp(argv[2], "zeroed") == 0;
   int cow = argc > 3 && strcmp(argv[3], "cow") == 0;
   const size_t stripeWords = 64 * 1024 * 1024 / 8;
   if (!mib || mib > 65536) return 2;
   size_t bytes = mib * 1024 * 1024;
-  uint64_t *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (p == MAP_FAILED) { perror("mmap"); return 2; }
+  /* Start on a 2 MiB boundary, so each zeroed stripe is whole MiBs for the
+   * checkpoint writer, whatever mapping lies next to this one. */
+  const size_t align = 2 * 1024 * 1024;
+  char *raw = mmap(NULL, bytes + align, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (raw == MAP_FAILED) { perror("mmap"); return 2; }
+  uint64_t *p = (uint64_t *) (((uintptr_t) raw + align - 1) & ~(align - 1));
+  if ((char *) p > raw) munmap(raw, (char *) p - raw);
+  munmap((char *) p + bytes, raw + align - (char *) p);
   /* Match the baseline's ordinary anonymous pages at checkpoint creation. */
   if (madvise(p, bytes, MADV_NOHUGEPAGE)) { perror("madvise"); return 2; }
   for (size_t i = 0; i < bytes / 8; ++i) {
     if (!sparse || (i / stripeWords) % 2 == 0) p[i] = word(i);
   }
-  printf("BENCH_CHECKPOINT mib=%zu sparse=%d\n", mib, sparse);
+  for (size_t i = stripeWords; zeroed && i < bytes / 8; i += 2 * stripeWords) {
+    size_t n = bytes / 8 - i < stripeWords ? bytes / 8 - i : stripeWords;
+    memset(p + i, 0, n * 8);
+  }
+  printf("BENCH_CHECKPOINT mib=%zu sparse=%d zeroed=%d\n", mib, sparse, zeroed);
   fflush(stdout);
   int result = dmtcp_checkpoint();
   if (result == DMTCP_NOT_PRESENT) return 3;
@@ -64,7 +77,7 @@ int main(int argc, char **argv)
   printf("BENCH_RESUMED monotonic=%.6f mib=%zu\n", start, mib);
   fflush(stdout);
   for (size_t i = 0; i < bytes / 8; ++i) {
-    uint64_t expected = sparse && (i / stripeWords) % 2 ? 0 : word(i);
+    uint64_t expected = (sparse || zeroed) && (i / stripeWords) % 2 ? 0 : word(i);
     if (p[i] != expected) {
       fprintf(stderr, "BENCH_CORRUPT word=%zu got=%" PRIx64 " expected=%" PRIx64 "\n",
               i, p[i], expected);
@@ -96,7 +109,7 @@ int main(int argc, char **argv)
     if (secondResult == DMTCP_AFTER_CHECKPOINT) return 0;
     if (secondResult != DMTCP_AFTER_RESTART) return 8;
     for (size_t i = 0; i < bytes / 8; ++i) {
-      uint64_t expected = sparse && (i / stripeWords) % 2 ? 0 : word(i);
+      uint64_t expected = (sparse || zeroed) && (i / stripeWords) % 2 ? 0 : word(i);
       if (i % (4096 / 8) == 0) expected ^= UINT64_C(0xfedcba9876543210);
       if (p[i] != expected) return 9;
     }

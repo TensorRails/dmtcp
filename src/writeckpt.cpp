@@ -324,6 +324,33 @@ mtcp_get_next_page_range(Area *area, size_t *size, int *is_zero)
   }
 }
 
+// Like mtcp_get_next_page_range(), but in MBs on MB boundaries, so a zero MB
+// is found wherever the area starts.  A part of an MB, at either end, counts
+// as data.
+static void
+mtcp_get_next_aligned_range(Area *area, size_t *size, int *is_zero)
+{
+  const uintptr_t one_MB = 1024 * 1024;
+  const uintptr_t start = (uintptr_t)area->addr;
+  const uintptr_t end = start + area->size;
+  uintptr_t pos = start;
+  int zero = -1;
+
+  while (pos < end) {
+    uintptr_t next = MIN(end, (pos + one_MB) & ~(one_MB - 1));
+    int z = next - pos == one_MB &&
+            Util::areZeroPages((void *)pos, one_MB / MTCP_PAGE_SIZE);
+    if (zero < 0) {
+      zero = z;
+    } else if (z != zero) {
+      break;
+    }
+    pos = next;
+  }
+  *size = pos - start;
+  *is_zero = zero > 0;
+}
+
 static void
 mtcp_write_anonymous_pages(int fd, Area area, bool residencyScanSafe)
 {
@@ -332,8 +359,14 @@ mtcp_write_anonymous_pages(int fd, Area area, bool residencyScanSafe)
   //   - zero runs are found by page residency (Util::scanOccupiedRangeBatch,
   //     via PAGEMAP_SCAN/pagemap) for anonymous memory, or by reading contents
   //     (mtcp_get_next_page_range -> Util::areZeroPages) for deleted-file maps;
+  //   - resident anonymous runs are read too, an aligned MB at a time
+  //     (mtcp_get_next_aligned_range): a process may hold gigabytes of
+  //     zeroed buffers (a cleared tensor or pool), and those are zero runs
+  //     as well.  Pinned CUDA host memory is a shared mapping and takes the
+  //     content scan anyway;
   //   - a zero run is saved as a DMTCP_ZERO_PAGE header with no data, then
-  //     dropped from RSS with madvise(MADV_DONTNEED); non-zero runs save bytes.
+  //     dropped from RSS with madvise(MADV_DONTNEED), unless it is resident;
+  //     non-zero runs save bytes.
   // On restart the parent header re-mmaps the whole region as fresh anonymous
   // memory (zero-fill-on-demand: zero runs are left unallocated, not physically
   // zeroed) and only the non-zero child runs are read back in.
@@ -355,6 +388,11 @@ mtcp_write_anonymous_pages(int fd, Area area, bool residencyScanSafe)
   // content scan.  The caller decides this (before any reclassification) and
   // passes it in as residencyScanSafe.
   bool useResidencyScan = residencyScanSafe;
+  bool scanResident = useResidencyScan &&
+    !Util::readBooleanEnv(ENV_VAR_DISABLE_ZERO_SCAN, false);
+  // End of the resident run the residency scan reported last: its contents
+  // are split into zero and non-zero runs without scanning its pages again.
+  uintptr_t residentEnd = 0;
 
   // Addresses advance monotonically and the list is sorted, so re-query only
   // after passing the current range.
@@ -366,6 +404,7 @@ mtcp_write_anonymous_pages(int fd, Area area, bool residencyScanSafe)
   while (area.size > 0) {
     size_t size;
     int is_zero;
+    bool resident = false;
     Area a = area;
     const uintptr_t addr = (uintptr_t)area.addr;
     const uintptr_t areaEnd = addr + area.size;
@@ -404,15 +443,25 @@ mtcp_write_anonymous_pages(int fd, Area area, bool residencyScanSafe)
       size = chunkSize;
       is_zero = 0;
     } else if (useResidencyScan) {
-      uintptr_t scanned = 0;
-      is_zero = Util::scanOccupiedRangeBatch(addr, chunkEnd, &scanned);
-      size = scanned;
-      if (size == 0) {
-        // Defensive: the scan should never report zero progress, but if it
-        // somehow does, treat the remaining chunk as occupied so the loop below
-        // (area.size -= size) advances instead of spinning forever.
-        size = chunkSize;
-        is_zero = 0;
+      if (addr >= residentEnd) {
+        uintptr_t scanned = 0;
+        is_zero = Util::scanOccupiedRangeBatch(addr, chunkEnd, &scanned);
+        size = scanned;
+        if (size == 0) {
+          // Defensive: the scan should never report zero progress, but if it
+          // somehow does, treat the remaining chunk as occupied so the loop
+          // below (area.size -= size) advances instead of spinning forever.
+          size = chunkSize;
+          is_zero = 0;
+        }
+        if (!is_zero && scanResident) {
+          residentEnd = addr + size;
+        }
+      }
+      if (addr < residentEnd) {
+        a.size = MIN(residentEnd, chunkEnd) - addr;
+        mtcp_get_next_aligned_range(&a, &size, &is_zero);
+        resident = true;
       }
     } else {
       a.size = chunkSize;
@@ -433,7 +482,9 @@ mtcp_write_anonymous_pages(int fd, Area area, bool residencyScanSafe)
 
     if (!is_zero) {
       writeCkptAll(fd, a.addr, a.size, "anonymous page data");
-    } else {
+    } else if (!resident) {
+      // Resident zeros stay: the process may run on after the checkpoint, and
+      // a page pinned for DMA (cudaHostRegister) must keep its frame.
       if (madvise(a.addr, a.size, MADV_DONTNEED) == -1) {
         TRACE("error doing madvise(..., MADV_DONTNEED): errno={} addr={} "
               "size={}",

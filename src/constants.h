@@ -148,6 +148,10 @@
 // restart.
 #define ENV_VAR_DISABLE_FILE_MAPPED     "DMTCP_DISABLE_FILE_MAPPED"
 
+// Set to "1" to save resident anonymous pages that hold only zeros, as before,
+// instead of recording each 1 MB run of them as a zero run with no data.
+#define ENV_VAR_DISABLE_ZERO_SCAN       "DMTCP_DISABLE_ZERO_SCAN"
+
 // this list should be kept up to date with all "protected" environment vars
 #define ENV_VARS_ALL                  \
   ENV_VAR_NAME_HOST,                  \
