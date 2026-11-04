@@ -92,9 +92,10 @@ benchmark verifies a later variable whose longer prefixed name occurs first.
 
 ## Resident zero pages
 
-A process can hold gigabytes of resident zeros: a pinned host buffer sized
-larger than what it holds, a pool cleared after use. The page residency scan
-saves every resident page. The writer now also reads resident private
+A process can hold gigabytes of resident zeros: a tensor or pool sized larger
+than what it holds, or cleared after use. The page residency scan saves every
+resident page of private anonymous memory. (Pinned CUDA host memory is a
+shared mapping of `/dev/zero`, which the content scan already covered.) The writer now also reads resident private
 anonymous memory a MiB at a time, on MiB address boundaries, and records each
 all-zero MiB as a zero run,
 the header the residency scan already writes for absent pages. A restart maps

@@ -361,8 +361,9 @@ mtcp_write_anonymous_pages(int fd, Area area, bool residencyScanSafe)
   //     (mtcp_get_next_page_range -> Util::areZeroPages) for deleted-file maps;
   //   - resident anonymous runs are read too, an aligned MB at a time
   //     (mtcp_get_next_aligned_range): a process may hold gigabytes of
-  //     zeroed buffers (a CUDA host buffer, a cleared pool), and those are
-  //     zero runs as well;
+  //     zeroed buffers (a cleared tensor or pool), and those are zero runs
+  //     as well.  Pinned CUDA host memory is a shared mapping and takes the
+  //     content scan anyway;
   //   - a zero run is saved as a DMTCP_ZERO_PAGE header with no data, then
   //     dropped from RSS with madvise(MADV_DONTNEED), unless it is resident;
   //     non-zero runs save bytes.
