@@ -120,11 +120,11 @@ def main():
         files = images(first)
         stored[name] = sum(os.path.getsize(f) for f in files)
         if layout == 'zeroed':
-            # The bench clears every odd 64 MiB stripe; none of it may be saved.
-            # Beyond the payload, the image holds what the ordinary one does.
-            other = stored['ordinary'] - 257 * 2**20
+            # The bench clears every odd 64 MiB stripe; none of it may be saved:
+            # the image is a dense one of the same size less those stripes.
+            dense = stored['ordinary' if mib == 257 else 'parallel16']
             zero = sum(min(64, mib - s) for s in range(64, mib, 128)) * 2**20
-            limit = mib * 2**20 - zero + other + 2**20
+            limit = dense - zero + 2**20
             assert stored[name] <= limit, \
                 f'{name}: {stored[name]} bytes stored, at most {limit} expected'
         if compressed:
