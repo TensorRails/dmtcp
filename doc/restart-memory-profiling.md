@@ -95,7 +95,8 @@ benchmark verifies a later variable whose longer prefixed name occurs first.
 A process can hold gigabytes of resident zeros: a pinned host buffer sized
 larger than what it holds, a pool cleared after use. The page residency scan
 saves every resident page. The writer now also reads resident private
-anonymous memory 1 MiB at a time and records each all-zero MiB as a zero run,
+anonymous memory a MiB at a time, on MiB address boundaries, and records each
+all-zero MiB as a zero run,
 the header the residency scan already writes for absent pages. A restart maps
 the area and reads only the other runs, so zeros cost neither image bytes nor
 reads. Restarts that predate this read such images too: the format is the same.
@@ -103,8 +104,9 @@ reads. Restarts that predate this read such images too: the format is the same.
 The check stops at the first nonzero word of each MiB, so ordinary data costs
 almost nothing; only zero MiBs are read whole, and they are no longer written.
 Resident zeros are left in place (no `MADV_DONTNEED`): the process may run on
-after the checkpoint, and a page pinned for DMA must keep its frame. Runs
-under 1 MiB are saved as before, so a run never costs more header than data.
+after the checkpoint, and a page pinned for DMA must keep its frame. Partial
+MiBs at the ends of a run are saved as before, so a zero run is never shorter
+than a MiB and never costs more header than data.
 `DMTCP_DISABLE_ZERO_SCAN=1` restores the old images byte for byte.
 
 `test/restore-memory-bench.c` has a `zeroed` layout, which writes every other

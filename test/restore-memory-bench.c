@@ -39,9 +39,15 @@ int main(int argc, char **argv)
   const size_t stripeWords = 64 * 1024 * 1024 / 8;
   if (!mib || mib > 65536) return 2;
   size_t bytes = mib * 1024 * 1024;
-  uint64_t *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (p == MAP_FAILED) { perror("mmap"); return 2; }
+  /* Start on a 2 MiB boundary, so each zeroed stripe is whole MiBs for the
+   * checkpoint writer, whatever mapping lies next to this one. */
+  const size_t align = 2 * 1024 * 1024;
+  char *raw = mmap(NULL, bytes + align, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (raw == MAP_FAILED) { perror("mmap"); return 2; }
+  uint64_t *p = (uint64_t *) (((uintptr_t) raw + align - 1) & ~(align - 1));
+  if ((char *) p > raw) munmap(raw, (char *) p - raw);
+  munmap((char *) p + bytes, raw + align - (char *) p);
   /* Match the baseline's ordinary anonymous pages at checkpoint creation. */
   if (madvise(p, bytes, MADV_NOHUGEPAGE)) { perror("madvise"); return 2; }
   for (size_t i = 0; i < bytes / 8; ++i) {

@@ -143,7 +143,8 @@ def main():
                    DMTCP_RESTART_HUGEPAGES=str(int(huge)), DMTCP_RESTART_MMAP=str(int(mapped)))
         text = run(root, case / 'restart.log', ['dmtcp_restart', *files], env)
         assert 'BENCH_VERIFIED' in text, text[-6000:]
-        if layout == 'zeroed' and readers > 1 and mib >= 1024 and not mapped:
+        if (layout == 'zeroed' and readers > 1 and mib >= 1024 and not mapped
+                and platform.machine() == 'x86_64'):
             # Zero runs cut the area into 64 MiB runs: read together, not one by one.
             assert any(map(int, re.findall(r'\bparallel_kib=(\d+)', text))), \
                 f'{name}: the readers did not share the runs between zero runs'

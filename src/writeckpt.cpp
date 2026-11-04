@@ -324,6 +324,33 @@ mtcp_get_next_page_range(Area *area, size_t *size, int *is_zero)
   }
 }
 
+// Like mtcp_get_next_page_range(), but in MBs on MB boundaries, so a zero MB
+// is found wherever the area starts.  A part of an MB, at either end, counts
+// as data.
+static void
+mtcp_get_next_aligned_range(Area *area, size_t *size, int *is_zero)
+{
+  const uintptr_t one_MB = 1024 * 1024;
+  const uintptr_t start = (uintptr_t)area->addr;
+  const uintptr_t end = start + area->size;
+  uintptr_t pos = start;
+  int zero = -1;
+
+  while (pos < end) {
+    uintptr_t next = MIN(end, (pos + one_MB) & ~(one_MB - 1));
+    int z = next - pos == one_MB &&
+            Util::areZeroPages((void *)pos, one_MB / MTCP_PAGE_SIZE);
+    if (zero < 0) {
+      zero = z;
+    } else if (z != zero) {
+      break;
+    }
+    pos = next;
+  }
+  *size = pos - start;
+  *is_zero = zero > 0;
+}
+
 static void
 mtcp_write_anonymous_pages(int fd, Area area, bool residencyScanSafe)
 {
@@ -332,9 +359,10 @@ mtcp_write_anonymous_pages(int fd, Area area, bool residencyScanSafe)
   //   - zero runs are found by page residency (Util::scanOccupiedRangeBatch,
   //     via PAGEMAP_SCAN/pagemap) for anonymous memory, or by reading contents
   //     (mtcp_get_next_page_range -> Util::areZeroPages) for deleted-file maps;
-  //   - resident anonymous runs are read too, 1 MB at a time: a process may
-  //     hold gigabytes of zeroed buffers (a CUDA host buffer, a cleared pool),
-  //     and those are zero runs as well;
+  //   - resident anonymous runs are read too, an aligned MB at a time
+  //     (mtcp_get_next_aligned_range): a process may hold gigabytes of
+  //     zeroed buffers (a CUDA host buffer, a cleared pool), and those are
+  //     zero runs as well;
   //   - a zero run is saved as a DMTCP_ZERO_PAGE header with no data, then
   //     dropped from RSS with madvise(MADV_DONTNEED), unless it is resident;
   //     non-zero runs save bytes.
@@ -431,7 +459,7 @@ mtcp_write_anonymous_pages(int fd, Area area, bool residencyScanSafe)
       }
       if (addr < residentEnd) {
         a.size = MIN(residentEnd, chunkEnd) - addr;
-        mtcp_get_next_page_range(&a, &size, &is_zero);
+        mtcp_get_next_aligned_range(&a, &size, &is_zero);
         resident = true;
       }
     } else {
