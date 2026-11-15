@@ -230,6 +230,7 @@ int DmtcpRWLockRdLock(DmtcpRWLock *rwlock);
 int DmtcpRWLockRdLockIgnoreQueuedWriter(DmtcpRWLock *rwlock);
 int DmtcpRWLockTryRdLock(DmtcpRWLock *rwlock);
 int DmtcpRWLockWrLock(DmtcpRWLock *rwlock);
+int DmtcpRWLockWrDowngrade(DmtcpRWLock *rwlock);
 int DmtcpRWLockUnlock(DmtcpRWLock *rwlock);
 
 

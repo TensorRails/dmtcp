@@ -2655,6 +2655,7 @@ class DmtcpTestHarnessUnitTest(unittest.TestCase):
             "mutex2", "mutex3", "mutex4", "timer1", "clock", "dlopen1",
             "dmtcp5", "shared-fd1", "shared-fd2", "stale-fd",
             "rlimit-nofile", "procfd1", "epoll1", "forkexec",
+            "fork-atfork-threads",
             "client-server", "seqpacket", "shared-memory1", "shared-memory2",
             "shared-memory3", "sysv-shm1", "sysv-shm2", "sysv-sem", "sysv-msg",
             "syscall-tester", "checkpoint-open-files-alias",
