@@ -40,6 +40,7 @@ void initMotherOfAll();
 void wrapperExecutionLockLock();
 void wrapperExecutionLockUnlock();
 void wrapperExecutionLockLockExcl();
+void wrapperExecutionLockDowngradeExcl();
 void wrapperExecutionLockLockForNewThread(Thread *thread);
 void wrapperExecutionLockUnlockForNewThread(Thread *thread);
 

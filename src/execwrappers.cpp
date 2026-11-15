@@ -74,22 +74,31 @@ isPerformingCkptRestart()
   return false;
 }
 
+// The fork() wrapper sets forkWrapperActive around libc fork(). The
+// exclusive wrapper lock is then taken by dmtcp_atfork_prepare() rather than
+// by the wrapper before calling libc fork(), and forkLockHeld records it.
+static __thread bool forkWrapperActive ATTR_TLS_INITIAL_EXEC = false;
+static __thread bool forkLockHeld ATTR_TLS_INITIAL_EXEC = false;
+
 LIB_PRIVATE void
 dmtcp_atfork_prepare()
 {
-  /* FIXME: The user process might register a fork prepare handler with
-   * pthread_atfork. That handler will be called _after_ we have acquired the
-   * wrapper-exec lock in exclusive mode. This can lead to a deadlock situation
-   * if the user process decides to do some operations that require calling a
-   * dmtcp wrapper that require the wrapper-exec lock.
+  /* libc runs prepare handlers in reverse order of registration, and ours is
+   * registered first, so it runs after every prepare handler of the
+   * application. Those handlers must run without the wrapper lock held in
+   * exclusive mode: they may join or create threads that need to pass through
+   * DMTCP wrappers (OpenBLAS joins its worker threads here, for example). With
+   * the lock held, such a thread blocks in the wrapper and the fork deadlocks,
+   * and a thread created under the exclusive lock corrupts the reader count.
    *
-   * Also, the preparation that dmtcp needs to do for fork() should be done
-   * right before the child process is created, i.e. after all the user
-   * handlers have been invoked. Fortunately, pthread_atfork prepare handlers
-   * are called in reverse order or registration (as opposed to parent and
-   * child handlers which are called in the order of registration), thus our
-   * prepare handle will be called at the very last.
+   * Taking the lock here still covers everything DMTCP must keep consistent:
+   * the ATFORK_PREPARE hooks that capture state for the child, the fork
+   * itself, and the parent-side bookkeeping in the fork() wrapper.
    */
+  if (forkWrapperActive) {
+    ThreadSync::wrapperExecutionLockLockExcl();
+    forkLockHeld = true;
+  }
 
   PluginManager::eventHook(DMTCP_EVENT_ATFORK_PREPARE, NULL);
 }
@@ -98,11 +107,23 @@ LIB_PRIVATE void
 dmtcp_atfork_parent()
 {
   PluginManager::eventHook(DMTCP_EVENT_ATFORK_PARENT, NULL);
+
+  /* Our parent handler runs before those of the application. Keep a shared
+   * hold for the rest of the fork() wrapper, so that no checkpoint starts
+   * before the wrapper has recorded the child, but let the application's
+   * parent handlers run without the exclusive lock.
+   */
+  if (forkLockHeld) {
+    ThreadSync::wrapperExecutionLockDowngradeExcl();
+  }
 }
 
 LIB_PRIVATE void
 dmtcp_atfork_child()
 {
+  forkLockHeld = false;
+  forkWrapperActive = false;
+
   ThreadSync::resetLocks();
 
   // Some plugins might make calls that require wrapper locks, etc.
@@ -179,12 +200,16 @@ fork()
 #endif
   }
 
-  /* Acquire the wrapperExeution lock to prevent checkpoint to happen while
-   * processing this system call.
+  /* The wrapper execution lock is acquired in exclusive mode by
+   * dmtcp_atfork_prepare(), after the application's prepare handlers, and
+   * downgraded to a shared hold by dmtcp_atfork_parent(). See there.
    */
-  WrapperLockExcl *wrapperLockExcl = new WrapperLockExcl();
+  forkWrapperActive = true;
+  forkLockHeld = false;
 
   pid_t childPid = _real_fork();
+
+  forkWrapperActive = false;
 
   if (childPid == -1) {
     PluginManager::eventHook(DMTCP_EVENT_ATFORK_FAILED, NULL);
@@ -220,8 +245,9 @@ fork()
     }
   }
 
-  if (childPid != 0) {
-    delete wrapperLockExcl;
+  if (childPid != 0 && forkLockHeld) {
+    forkLockHeld = false;
+    ThreadSync::wrapperExecutionLockUnlock();
   }
 
   return childPid;

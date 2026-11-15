@@ -263,6 +263,30 @@ ThreadSync::wrapperExecutionLockLockExcl()
   errno = saved_errno;
 }
 
+// Turn an exclusive wrapper lock held by this thread into a shared one,
+// without a window in which the checkpoint thread could take the lock. The
+// caller still owes one wrapperExecutionLockUnlock().
+void
+ThreadSync::wrapperExecutionLockDowngradeExcl()
+{
+  int saved_errno = errno;
+
+  // The process is still initializing. We don't need to acquire lock.
+  if (WorkerState::currentState() == WorkerState::UNKNOWN) {
+    errno = saved_errno;
+    return;
+  }
+
+  Thread *thread = dmtcp_get_current_thread();
+
+  ASSERT_EQ(1u, thread->wrapperLockCount,
+            "wrapper execution lock downgrade expects one exclusive hold: "
+            "tid={}", thread->tid);
+  ASSERT_LOCK_SUCCESS(DmtcpRWLockWrDowngrade(&_wrapperExecutionLock));
+
+  errno = saved_errno;
+}
+
 // NOTE: Don't do any fancy stuff in this wrapper which can cause the process
 // to go into DEADLOCK
 void

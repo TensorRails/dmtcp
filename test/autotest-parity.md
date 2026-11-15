@@ -150,5 +150,6 @@ equivalent. They are part of the authoritative registry and run in `make check`.
 | --- | --- |
 | `dlopen-origin` | Resolve `$ORIGIN` for the original dlopen caller. |
 | `fcntl64-dup` | Track CPython-style fcntl64 descriptor duplication. |
+| `fork-atfork-threads` | Fork while pthread_atfork handlers join or create threads (OpenBLAS pattern). |
 | `sem-unlinked-shared` | Restore shared semaphores whose files were already unlinked. |
 | `setsockopt-race` | Keep a socket connection locked while updating its options. |

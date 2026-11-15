@@ -148,6 +148,45 @@ int DmtcpRWLockWrUnlock(DmtcpRWLock *rwlock)
   return 0;
 }
 
+// Atomically turn the caller's write lock into a read lock. No other writer
+// can get in between. A writer that is already queued keeps its preference:
+// readers queued behind it stay queued and it runs once our read lock and any
+// other read locks are released. Without a queued writer, queued readers are
+// admitted together with us.
+extern "C"
+int DmtcpRWLockWrDowngrade(DmtcpRWLock *rwlock)
+{
+  DmtcpRWLockStatus oldStatus;
+  DmtcpRWLockStatus newStatus;
+
+  ASSERT_EQ(gettid(), rwlock->writerTid);
+  ASSERT_EQ(0, rwlock->status.nReaders);
+
+  rwlock->writerTid = 0;
+
+  __atomic_load(&rwlock->status, &oldStatus, __ATOMIC_RELAXED);
+
+  do {
+    newStatus = oldStatus;
+    newStatus.nWriters--;
+    newStatus.nReaders = 1;
+    if (newStatus.nWriters == 0) {
+      newStatus.nReaders += newStatus.nReadersQueued;
+      newStatus.nReadersQueued = 0;
+    }
+  } while (!__atomic_compare_exchange(&rwlock->status, &oldStatus, &newStatus,
+                                     false, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+
+  if (newStatus.nWriters == 0 && oldStatus.nReadersQueued > 0) {
+    rwlock->readerFutex++;
+    ASSERT_NE(-1, futex_wake(&rwlock->readerFutex, oldStatus.nReadersQueued),
+              "reader futex_wake failed from writer downgrade: readers={}",
+              oldStatus.nReadersQueued);
+  }
+
+  return 0;
+}
+
 int DmtcpRWLockUnlock(DmtcpRWLock *rwlock)
 {
   if (rwlock->writerTid == gettid()) {
