@@ -19,6 +19,7 @@
  *  <http://www.gnu.org/licenses/>.                                         *
  ****************************************************************************/
 
+#include <malloc.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include "alloc.h"
@@ -74,55 +75,91 @@ isExitingThread()
   return thread != nullptr && thread->exiting;
 }
 
+// The exiting thread must also not resolve the real function.  NEXT_FNC()
+// resolves on first use through dmtcp_dlsym(), which takes read access to the
+// DMTCP wrapper lock (and glibc's dl_load_lock in dladdr1()).  The real free()
+// used to be looked up from a separate NEXT_FNC() call site in the exiting
+// branch below, so the first exiting thread that evicted a cached stack did
+// that lookup while holding the cache-of-stacks lock, and the deadlock above
+// came back through dmtcp_dlsym().
+//
+// So each wrapper's function has exactly one NEXT_FNC() call site, in the
+// accessors below, shared by the locked and the exiting branches, and
+// resolveRealAllocFns() resolves all of them while libdmtcp.so is loaded:
+// before the program can create, let alone end, a thread.  The lookup stays
+// lazy too, because allocations happen before that constructor runs.
+static inline __typeof__(&malloc) realMalloc() { return _real_malloc; }
+static inline __typeof__(&calloc) realCalloc() { return _real_calloc; }
+static inline __typeof__(&valloc) realValloc() { return _real_valloc; }
+static inline __typeof__(&realloc) realRealloc() { return _real_realloc; }
+static inline __typeof__(&free) realFree() { return _real_free; }
+static inline __typeof__(&memalign) realMemalign() { return _real_memalign; }
+static inline __typeof__(&posix_memalign) realPosixMemalign()
+{
+  return _real_posix_memalign;
+}
+
+static void __attribute__((constructor))
+resolveRealAllocFns()
+{
+  realMalloc();
+  realCalloc();
+  realValloc();
+  realRealloc();
+  realFree();
+  realMemalign();
+  realPosixMemalign();
+}
+
 extern "C" void *calloc(size_t nmemb, size_t size)
 {
   if (!dmtcp_alloc_enabled() || isExitingThread()) {
-    return _real_calloc(nmemb, size);
+    return realCalloc()(nmemb, size);
   }
 
   WrapperLock wrapperLock;
-  return _real_calloc(nmemb, size);
+  return realCalloc()(nmemb, size);
 }
 
 extern "C" void *malloc(size_t size)
 {
   if (!dmtcp_alloc_enabled() || isExitingThread()) {
-    return _real_malloc(size);
+    return realMalloc()(size);
   }
 
   WrapperLock wrapperLock;
-  return _real_malloc(size);
+  return realMalloc()(size);
 }
 
 extern "C" void *memalign(size_t boundary, size_t size)
 {
   if (!dmtcp_alloc_enabled() || isExitingThread()) {
-    return _real_memalign(boundary, size);
+    return realMemalign()(boundary, size);
   }
 
   WrapperLock wrapperLock;
-  return _real_memalign(boundary, size);
+  return realMemalign()(boundary, size);
 }
 
 extern "C" int
 posix_memalign(void **memptr, size_t alignment, size_t size)
 {
   if (!dmtcp_alloc_enabled() || isExitingThread()) {
-    return _real_posix_memalign(memptr, alignment, size);
+    return realPosixMemalign()(memptr, alignment, size);
   }
 
   WrapperLock wrapperLock;
-  return _real_posix_memalign(memptr, alignment, size);
+  return realPosixMemalign()(memptr, alignment, size);
 }
 
 extern "C" void *valloc(size_t size)
 {
   if (!dmtcp_alloc_enabled() || isExitingThread()) {
-    return _real_valloc(size);
+    return realValloc()(size);
   }
 
   WrapperLock wrapperLock;
-  return _real_valloc(size);
+  return realValloc()(size);
 }
 
 extern "C" void
@@ -133,20 +170,20 @@ free(void *ptr)
     return;
   }
   if (!dmtcp_alloc_enabled() || isExitingThread()) {
-    _real_free(ptr);
+    realFree()(ptr);
     return;
   }
 
   WrapperLock wrapperLock;
-  _real_free(ptr);
+  realFree()(ptr);
 }
 
 extern "C" void *realloc(void *ptr, size_t size)
 {
   if (!dmtcp_alloc_enabled() || isExitingThread()) {
-    return _real_realloc(ptr, size);
+    return realRealloc()(ptr, size);
   }
 
   WrapperLock wrapperLock;
-  return _real_realloc(ptr, size);
+  return realRealloc()(ptr, size);
 }
