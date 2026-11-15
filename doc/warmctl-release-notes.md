@@ -1,3 +1,27 @@
+# v5.0.0-warmctl.3
+
+fork() no longer hangs or aborts when the application's `pthread_atfork`
+handlers synchronize with other threads.
+
+- DMTCP used to take the wrapper execution lock in exclusive mode before
+  calling libc `fork()`, so the application's prepare and parent handlers ran
+  under it. A prepare handler that joins worker threads (OpenBLAS, pulled in
+  by PyTorch with ROCm) deadlocked, since an exiting thread needs the lock;
+  a handler that created a thread corrupted the lock's reader count
+  (`rwlock.cpp` assertion). DMTCP now takes the lock from its own prepare
+  handler, which glibc runs after the application's, and turns it into a
+  shared lock in its parent handler, which runs before the application's.
+  A checkpoint still cannot start between the prepare and parent handlers.
+- New test `fork-atfork-threads` reproduces both failures without a GPU.
+
+In a ROCm container, a Python process forking after OpenBLAS initialization
+hung under DMTCP in 6 of 6 runs before the fix and completed in 12 of 12 after.
+The `threadsync.cpp` EDEADLK assertion seen on MI350X fits the corrupted lock
+state but has not yet been re-checked on that GPU.
+
+Checkpoint images are unchanged: this release restarts v5.0.0-warmctl.2
+images and vice versa.
+
 # v5.0.0-warmctl.2
 
 Smaller images and faster restarts for processes holding resident zeros.
